@@ -1,0 +1,15 @@
+[
+  {
+    "arguments": [
+      "/usr/bin/gcc",
+      "-c",
+      "-Wall",
+      "-o",
+      "motordriver",
+      "src/motordriver.c"
+    ],
+    "directory": "/home/chord/robot",
+    "file": "/home/chord/robot/src/motordriver.c",
+    "output": "/home/chord/robot/motordriver"
+  }
+]

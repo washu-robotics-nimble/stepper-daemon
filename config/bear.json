@@ -1,0 +1,8 @@
+{
+  "format": {
+    "paths": {
+      "directory": "relative",
+      "file": "relative"
+    }
+  }
+}
