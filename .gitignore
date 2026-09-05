@@ -1,1 +1,4 @@
 /lib/lg/*/
+motor_demo
+*.o
+/lg-master/

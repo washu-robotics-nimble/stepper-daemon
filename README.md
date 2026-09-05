@@ -8,18 +8,36 @@ Designed to run on a Raspberry Pi 4, and (should) support previous generations.
 
 # Usage
 
-```
-# First install the lg library:
+```shell
+# First get the necessary packages:
+
+sudo apt update
+sudo apt install gpiod libgpiod-dev
+# You likely don't need this since we are using C:
+# sudo apt install python3-gpiozero python3-lgpio python3-pip
+
+# Then install the lg library:
 wget https://github.com/joan2937/lg/archive/master.zip
 unzip master.zip
 cd lg-master
 make
 sudo make install
 
-# Then compile this project:
+# Now compile this project:
 make # compiles project.        # Cross-compiling needed if ran on a different machine.
 nano motor.ini                  # Adjust parameters as needed.
-./motor_demo
+./motor_demo                    # You probably need root access; see below for more info
+
+# About root access:
+# You probably need root access to run it, if you are on Ubuntu.
+ls -la /dev/gpiochip*           # Your user may have --- permissions
+gentent group gpio              # Check if gpio group exists
+# sudo groupadd gpio            # Add it if it doesn't exist
+sudo chown root:gpio /dev/gpiochip*  # Change group ownership of gpio devices
+sudo usermod -aG gpio $USER     # Add yourself to the group
+newgrp gpio                     # Apply without restart/logout
+groups                          # Verify. Now it should work without root access
+
 ```
 
 # Todo list
