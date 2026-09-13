@@ -40,6 +40,9 @@ typedef struct {
     int32_t cmd_param;              // Steps / target position
     atomic_bool cmd_done;
 
+    pthread_mutex_t done_mutex;     // Command done
+    pthread_cond_t done_cond;      // Command done condition
+
     pthread_t *thread;
 } motor_t;
 

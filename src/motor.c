@@ -108,6 +108,8 @@ int motor_init(motor_t *motor, const motor_config_t *cfg)
     // Initialize synchronized structs
     pthread_mutex_init(&motor->cmd_mutex, NULL);
     pthread_cond_init(&motor->cmd_cond, NULL);
+    pthread_mutex_init(&motor->done_mutex, NULL);
+    pthread_cond_init(&motor->done_cond, NULL);
 
     // Create control thred
     pthread_t *pt = lgThreadStart(motor_thread_func, motor);
@@ -148,6 +150,8 @@ void motor_close(motor_t *motor)
     }
     pthread_mutex_destroy(&motor->cmd_mutex);
     pthread_cond_destroy(&motor->cmd_cond);
+    pthread_mutex_destroy(&motor->done_mutex);
+    pthread_cond_destroy(&motor->done_cond);
 }
 
 // MAIN THREAD LOOP
@@ -266,6 +270,11 @@ static void* motor_thread_func(void *arg)
 
             atomic_store(&motor->stop_requested, false);
             atomic_store(&motor->moving, false);
+            atomic_store(&motor->cmd_done, true);
+
+            pthread_mutex_lock(&motor->done_mutex); // Prevent read-on-write
+            pthread_cond_broadcast(&motor->done_cond); // Notify waiting thread
+            pthread_mutex_unlock(&motor->done_mutex);
         }
 
         atomic_store(&motor->cmd_done, true);
@@ -309,9 +318,11 @@ int motor_stop(motor_t *motor)
 
 int motor_wait(motor_t *motor)
 {
+    pthread_mutex_lock(&motor->done_mutex);
     while (atomic_load(&motor->moving) || !atomic_load(&motor->cmd_done)) {
-        lguSleep(0.001);
+        pthread_cond_wait(&motor->done_cond, &motor->done_mutex);
     }
+    pthread_mutex_unlock(&motor->done_mutex);
     return MOTOR_OK;
 }
 

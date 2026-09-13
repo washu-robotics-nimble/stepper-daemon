@@ -2,3 +2,5 @@
 motor_demo
 *.o
 /lg-master/
+/.vscode/
+rsync-remote.sh

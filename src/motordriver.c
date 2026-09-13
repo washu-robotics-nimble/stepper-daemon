@@ -15,11 +15,11 @@ int main(int argc, char *argv[])
     {
         if (lgGpioClaimOutput(h, LFLAGS, OUT_PIN, 0) == LG_OKAY)
         {
-            lgTxPulse(h, OUT_PIN, 20000, 30000, 0, 0); // This, very unfortunately, is
-                                                       // software PWM. There exists a
-                                                       // way to hardware but lgpio
-                                                       // does not support it. Maybe a
-                                                       // future task.
+            lgTxPulse(h, OUT_PIN, 20000, 30000, 0, 0); 
+            // This, very unfortunately, is software PWM. There exists a
+            // way to do hardware PWM by directly write to /dev/ but lgpio
+            // does not support it. Maybe a future task.
+
             lguSleep(2);
             lgTxPulse(h, OUT_PIN, 500, 100, 0, LOOPS);
             start = lguTime();

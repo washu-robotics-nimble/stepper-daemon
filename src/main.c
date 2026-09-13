@@ -3,6 +3,8 @@
 #include <unistd.h>
 #include "config.h"
 #include "motor.h"
+#include "command.h"
+#include "cli.h"
 
 int main(int argc, char *argv[])
 {
@@ -11,68 +13,32 @@ int main(int argc, char *argv[])
 
     motor_config_t cfg;
     if (config_load(conf_file, &cfg) != 0) {
+        fprintf(stderr, "Failed to load config.\n");
         return EXIT_FAILURE;
     }
 
     motor_t motor;
     if (motor_init(&motor, &cfg) != MOTOR_OK) {
+        fprintf(stderr, "Failed to init motor.\n");
+        return EXIT_FAILURE;
+    } else {
+        printf("Motor initialized.\n");
+    }
+
+    if (command_init() != 0) {
+        fprintf(stderr, "Failed to init command module.\n");
+        motor_close(&motor);
         return EXIT_FAILURE;
     }
 
-    printf("Motor initialized.\n");
-
-    // Test sequence:
-    printf("Enable motor...\n");
-    motor_enable(&motor);
-    lguSleep(0.1);
-
-    printf("Move relative +5000 steps...\n");
-    motor_move_rel(&motor, 5000);
-    motor_wait(&motor);
-    int32_t pos;
-    if (motor_get_position(&motor, &pos) == 0)
-        printf("Position after +5000: %d\n", pos);
-    else
-        printf("Position invalid.\n");
-
-    printf("Move relative -2000 steps...\n");
-    motor_move_rel(&motor, -2000);
-    motor_wait(&motor);
-    if (motor_get_position(&motor, &pos) == 0)
-        printf("Position after -2000: %d\n", pos);
-
-    printf("Start long movement +20000 ...\n");
-    motor_move_rel(&motor, 20000);
-    lguSleep(0.3);  // 运动一部分
-    printf("Emergency stop!\n");
-    motor_stop(&motor);
-    motor_wait(&motor);
-    if (motor_get_position(&motor, &pos) == 0)
-        printf("Position after stop: %d\n", pos);
-    else
-        printf("Position is now INVALID (no feedback or stop during motion).\n");
-
-    printf("Zero position...\n");
-    motor_zero(&motor);
-    printf("Position after zero: ");
-    if (motor_get_position(&motor, &pos) == 0) printf("%d\n", pos);
-    else printf("INVALID\n");
-
-    printf("Set microstep to 8...\n");
-    if (motor_set_microstep(&motor, 8) != 0) {
-        printf("Failed (maybe still moving?)\n");
+    if (cli_init(&motor) != 0) {
+        fprintf(stderr, "Failed to init CLI.\n");
+        motor_close(&motor);
+        return EXIT_FAILURE;
     }
 
-    printf("Move relative +1000 steps with microstep 8...\n");
-    motor_move_rel(&motor, 1000);
-    motor_wait(&motor);
-    if (motor_get_position(&motor, &pos) == 0)
-        printf("Position: %d\n", pos);
+    cli_run();
 
-    printf("Disable motor...\n");
-    motor_disable(&motor);
-
-    printf("Test complete.\n");
     motor_close(&motor);
     return EXIT_SUCCESS;
 }

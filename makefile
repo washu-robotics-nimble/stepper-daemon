@@ -2,16 +2,20 @@ CC = gcc
 CFLAGS = -Wall -O2 -std=c11
 LDFLAGS = -llgpio -lpthread
 
-OBJ = lib/inih/ini.o src/config.o src/motor.o src/main.o 
+SRC = src/main.c src/config.c src/motor.c src/command.c src/status.c src/cli.c lib/inih/ini.c
+OBJ = $(SRC:.c=.o)
 
-all: motor_demo
+TARGET = motor_demo
 
-motor_demo: $(OBJ)
+all: $(TARGET)
+
+$(TARGET): $(OBJ)
 	$(CC) -o $@ $^ $(LDFLAGS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-.PHONY: clean
 clean:
-	rm -f motor_demo $(OBJ)
+	rm -f $(TARGET) $(OBJ)
+
+.PHONY: all clean
