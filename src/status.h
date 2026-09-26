@@ -18,6 +18,7 @@ typedef enum {
 // position/moving asynchronously, so re-reading per field can mix states.
 typedef struct {
     int              moving;
+    int              locked;          // Output enabled, i.e. holding torque
     int              pos_valid;
     int32_t          position;        // Meaningful only when pos_valid
     int              accel;           // Accel limit, 0 = ramping off

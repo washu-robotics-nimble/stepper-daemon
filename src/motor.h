@@ -31,6 +31,7 @@ typedef struct {
     atomic_bool position_valid;     // Validity of current position
 
     atomic_bool moving;             // "Moving" flag
+    atomic_bool locked;             // Output enabled, i.e. holding torque
     atomic_bool stop_requested;     // Stop request
     atomic_bool feedback_enabled;   // Loopback status
     _Atomic uint64_t feedback_cnt;  // STEP loopback rising edge count
@@ -71,6 +72,7 @@ int motor_wait(motor_t *motor);
 
 // Status checking:
 int motor_is_moving(motor_t *motor);
+int motor_is_locked(motor_t *motor);                  // 1=holding, 0=free to spin
 int motor_get_position(motor_t *motor, int32_t *pos); // 0=valid, -7=invalid
 
 // Config adjustment: (must not be called during motion)

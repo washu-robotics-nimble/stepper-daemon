@@ -67,6 +67,7 @@ void status_capture(motor_t *motor, status_t *st)
         st->pos_valid = (motor_get_position(motor, &pos) == MOTOR_OK);
         st->position  = st->pos_valid ? pos : 0;
         st->moving    = motor_is_moving(motor) ? 1 : 0;
+        st->locked    = motor_is_locked(motor) ? 1 : 0;
         st->accel     = motor->accel;
     }
 }
@@ -92,6 +93,7 @@ int status_equal(const status_t *a, const status_t *b)
     // The argument union holds only 32-bit scalars, so comparing its bytes
     // is equivalent to comparing whichever member the type selects.
     return a->moving      == b->moving
+        && a->locked      == b->locked
         && a->pos_valid   == b->pos_valid
         && a->position    == b->position
         && a->accel       == b->accel
@@ -117,8 +119,9 @@ int status_format(const status_t *st, char *buf, size_t buf_size)
         snprintf(accel_desc, sizeof(accel_desc), "off");
 
     int n = snprintf(buf, buf_size,
-                     "%s | Pos: %s%d | Accel: %s | Cmd: %s | Last: %s",
+                     "%s | %s | Pos: %s%d | Accel: %s | Cmd: %s | Last: %s",
                      status_state_name(status_state(st)),
+                     st->locked ? "Locked" : "Unlocked",
                      st->pos_valid ? "" : "INVALID ",
                      st->pos_valid ? st->position : 0,
                      accel_desc,

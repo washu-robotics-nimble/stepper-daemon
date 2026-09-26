@@ -48,33 +48,12 @@ groups                          # Verify. Now it should work without root access
     - [x] Threaded program
     - [x] Acceleration limiting (trapezoidal ramp)
     - [ ] Endstop support
-- [ ] CLI-based control
-    - [ ] STDIN reading
-    - [ ] Real-time status display
+- [x] CLI-based control
+    - [x] STDIN reading
+    - [x] Real-time status display
 - [ ] Remote control
     - [ ] Control over serial
     - [ ] Control over LAN
-
-
-
-# Acceleration limiting
-
-Set `max_accel` under `[motion]` in `motor.ini` (full steps / sec^2) to cap
-how fast the motor may change speed. `0` disables it, which is the default
-and reproduces the old behaviour of jumping straight to the target speed.
-
-When enabled, each move is emitted as a ramp-up / cruise / ramp-down
-staircase of constant-frequency bursts. Moves too short to reach the target
-speed automatically degrade to a triangular profile. It can also be changed
-at runtime with the `accel` CLI command, and the current setting is shown in
-the status line.
-
-Two caveats:
-
-- `stop` is still an immediate halt, not a controlled deceleration. It is a
-  request to stop, so it deliberately bypasses the accel limit.
-- The ramp is a staircase, not a continuous curve, so the very first burst
-  starts at a non-zero step rate. The jump is small but nonzero.
 
 # Notes
 
