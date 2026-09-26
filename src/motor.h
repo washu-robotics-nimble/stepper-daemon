@@ -22,6 +22,8 @@ typedef struct {
 
     int microsteps;                 // Current microstep resolution
     int speed;                      // Current speed (full steps / sec)
+    int accel;                      // Max acceleration (full steps / sec^2)
+                                    // 0 disables ramping
     int pulse_width_us;             // Current pulsewidth
     int dir_active_high;            // Current direction polarity
 
@@ -73,6 +75,7 @@ int motor_get_position(motor_t *motor, int32_t *pos); // 0=valid, -7=invalid
 
 // Config adjustment: (must not be called during motion)
 int motor_set_speed(motor_t *motor, int speed);        // Full steps / sec
+int motor_set_accel(motor_t *motor, int accel);        // Full steps / sec^2, 0=off
 int motor_set_microstep(motor_t *motor, int ms);
 int motor_set_pulse_width(motor_t *motor, int us);
 

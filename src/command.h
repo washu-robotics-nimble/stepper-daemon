@@ -23,6 +23,7 @@ typedef enum {
     CMD_TYPE_ABS,
     CMD_TYPE_STOP,
     CMD_TYPE_SPEED,
+    CMD_TYPE_ACCEL,
     CMD_TYPE_MICRO,
     CMD_TYPE_POS,
     CMD_TYPE_STATUS,
@@ -41,6 +42,7 @@ typedef struct {
         int32_t rel_steps;
         int32_t abs_pos;
         int speed;
+        int accel;
         int microsteps;
     } args;
 } command_t;

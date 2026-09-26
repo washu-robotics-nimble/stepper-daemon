@@ -1,10 +1,30 @@
 #include "motor.h"
+#include "ramp.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <string.h> // So I can use memset without compiler yelling at me
 
+// Minimum STEP LOW time. Must stay above the lg library's own floor
+// (lgMinTxDelay, see lib/lg/lgPthTx.c) or lgTxPulse refuses the pulse.
+#define MOTOR_MIN_PULSE_OFF_US 10
+
 static void* motor_thread_func(void *arg); // Internal helper function
+
+// Marks the running command finished and wakes anyone blocked in
+// motor_wait(). Every exit path out of a move must go through this --
+// setting cmd_done without broadcasting leaves motor_wait() stuck.
+static void motor_finish_cmd(motor_t *motor)
+{
+    atomic_store(&motor->stop_requested, false);
+    atomic_store(&motor->moving, false);
+    atomic_store(&motor->cmd_done, true);
+
+    pthread_mutex_lock(&motor->done_mutex);   // Prevent read-on-write
+    pthread_cond_broadcast(&motor->done_cond); // Notify waiting thread
+    pthread_mutex_unlock(&motor->done_mutex);
+}
+
 // (NOT IMPLEMENTED:)
 // static void update_position_from_feedback(motor_t *motor, int dir_positive,
 //                                           int microsteps);
@@ -47,6 +67,7 @@ int motor_init(motor_t *motor, const motor_config_t *cfg)
 
     motor->microsteps = cfg->microsteps;
     motor->speed = cfg->default_speed;
+    motor->accel = cfg->max_accel;
     motor->pulse_width_us = cfg->pulse_width_us;
 
     // Claiming pins:
@@ -172,7 +193,7 @@ static void* motor_thread_func(void *arg)
 
         if (cmd == 3) {
             // STOP command is set by `motor_stop` externally through 
-            // `stop_requested`, we don't deal with it here.
+            // `stop_requested`, we won't handle it here.
             // The thread is only responsible for movement control
         } else if (cmd == 1 || cmd == 2) {
             // cmd 1: relative; cmd 2: absolute
@@ -186,7 +207,7 @@ static void* motor_thread_func(void *arg)
                 if (!pos_valid) {
                     // Invalid position
                     fprintf(stderr, "Motor: cannot absolute move, position invalid\n");
-                    atomic_store(&motor->cmd_done, true);
+                    motor_finish_cmd(motor);
                     continue;
                 }
                 target_rel = param - cur_pos;
@@ -204,22 +225,48 @@ static void* motor_thread_func(void *arg)
             // calculate pulse parameters:
             int abs_steps = (target_rel >= 0) ? target_rel : -target_rel;
             if (abs_steps == 0) {
-                atomic_store(&motor->moving, false);
-                atomic_store(&motor->cmd_done, true);
+                motor_finish_cmd(motor);
                 continue;
             }
             int total_pulses = abs_steps * motor->microsteps;
-            int freq = motor->speed * motor->microsteps; // Pulses per second
-            if (freq <= 0) freq = 1;
-            int period_us = 1000000 / freq; // microseconds
-            int pulse_on = motor->pulse_width_us;
-            int pulse_off = period_us - pulse_on;
 
-            if (pulse_off < 10) {
-                fprintf(stderr, "Motor: speed too high, period too short.\n");
-                atomic_store(&motor->moving, false);
-                atomic_store(&motor->cmd_done, true);
-                continue;
+            // Build the motion profile. With an acceleration limit set the
+            // move becomes a ramp-up / cruise / ramp-down staircase; with
+            // no limit it stays a single constant-frequency burst.
+            ramp_plan_t plan;
+            if (motor->accel > 0) {
+                int rerr = ramp_build_plan(motor->speed, motor->accel,
+                                           motor->microsteps,
+                                           motor->pulse_width_us,
+                                           abs_steps,
+                                           MOTOR_MIN_PULSE_OFF_US, &plan);
+                if (rerr != RAMP_OK) {
+                    // Refuse the move rather than silently running it
+                    // unramped -- the accel limit is there for a reason.
+                    fprintf(stderr, "Motor: cannot plan ramp (%s).\n",
+                            rerr == RAMP_ERR_TOO_FAST
+                                ? "speed too high, period too short"
+                                : "bad motion parameters");
+                    motor_finish_cmd(motor);
+                    continue;
+                }
+            } else {
+                int freq = motor->speed * motor->microsteps; // Pulses per second
+                if (freq <= 0) freq = 1;
+                int period_us = 1000000 / freq; // microseconds
+                int pulse_on = motor->pulse_width_us;
+                int pulse_off = period_us - pulse_on;
+
+                if (pulse_off < MOTOR_MIN_PULSE_OFF_US) {
+                    fprintf(stderr, "Motor: speed too high, period too short.\n");
+                    motor_finish_cmd(motor);
+                    continue;
+                }
+
+                plan.segments[0].pulse_on_us  = pulse_on;
+                plan.segments[0].pulse_off_us = pulse_off;
+                plan.segments[0].cycles       = total_pulses;
+                plan.num_segments = 1;
             }
 
             // Record initial feedback value
@@ -228,16 +275,43 @@ static void* motor_thread_func(void *arg)
                 start_cnt = atomic_load(&motor->feedback_cnt);
             }
 
-            // Begin pulses
-            lgTxPulse(motor->handle, motor->step_pin, pulse_on, pulse_off, 0, total_pulses);
+            // Begin pulses. lgTxPulse is non-blocking and the driver runs
+            // queued entries back-to-back with no gap between them, so the
+            // whole profile goes in up front -- RAMP_MAX_SEGMENTS is kept
+            // within the driver's per-GPIO queue depth so this can't
+            // overflow.
+            bool queued_all = true;
+            for (int i = 0; i < plan.num_segments; i++) {
+                int q = lgTxPulse(motor->handle, motor->step_pin,
+                                  plan.segments[i].pulse_on_us,
+                                  plan.segments[i].pulse_off_us,
+                                  0, plan.segments[i].cycles);
+                if (q < 0) {
+                    fprintf(stderr, "Motor: failed to queue segment %d/%d: %s\n",
+                            i + 1, plan.num_segments, lguErrorText(q));
+                    queued_all = false;
+                    break;
+                }
+            }
+
+            bool aborted = false;
+            if (!queued_all) {
+                // A partial profile is already running: kill it. One call
+                // drops the active entry and everything still queued.
+                lgTxPulse(motor->handle, motor->step_pin, 0, 0, 0, 0);
+                lguSleep(0.002);
+                aborted = true;
+            }
 
             // Wait for completion of STOP
-            while (lgTxBusy(motor->handle, motor->step_pin, LG_TX_PWM)) {
+            while (!aborted && lgTxBusy(motor->handle, motor->step_pin, LG_TX_PWM)) {
                 if (atomic_load(&motor->stop_requested)) {
-                    // STOP: This stops it immediately
+                    // STOP: This stops it immediately, including any ramp
+                    // segments still sitting in the driver queue
                     lgTxPulse(motor->handle, motor->step_pin, 0, 0, 0, 0);
                     // Wait a bit so the last edge can be properly picked up
                     lguSleep(0.002);
+                    aborted = true;
                     break;
                 }
                 lguSleep(0.001);
@@ -258,23 +332,17 @@ static void* motor_thread_func(void *arg)
                 atomic_store(&motor->position_valid, true);
             } else {
                 // No loopback: Natural completion gives theoretical position
-                if (!atomic_load(&motor->stop_requested)) {
+                if (!aborted) {
                     int32_t old_pos = atomic_load(&motor->position);
                     atomic_store(&motor->position, old_pos + target_rel);
                     atomic_store(&motor->position_valid, true);
                 } else {
-                    // Unnatural (STOP) invalidates position
+                    // Unnatural (STOP / queue failure) invalidates position
                     atomic_store(&motor->position_valid, false);
                 }
             }
 
-            atomic_store(&motor->stop_requested, false);
-            atomic_store(&motor->moving, false);
-            atomic_store(&motor->cmd_done, true);
-
-            pthread_mutex_lock(&motor->done_mutex); // Prevent read-on-write
-            pthread_cond_broadcast(&motor->done_cond); // Notify waiting thread
-            pthread_mutex_unlock(&motor->done_mutex);
+            motor_finish_cmd(motor);
         }
 
         atomic_store(&motor->cmd_done, true);
@@ -349,13 +417,21 @@ int motor_set_speed(motor_t *motor, int speed)
     return MOTOR_OK;
 }
 
+int motor_set_accel(motor_t *motor, int accel)
+{
+    if (atomic_load(&motor->moving)) return MOTOR_ERR_MOVING;
+    if (accel < 0) return MOTOR_ERR_PARAM;  // 0 is legal: disables ramping
+    motor->accel = accel;
+    return MOTOR_OK;
+}
+
 int motor_set_microstep(motor_t *motor, int ms)
 {
     if (atomic_load(&motor->moving)) return MOTOR_ERR_MOVING;
     if (ms != 1 && ms != 2 && ms != 4 && ms != 8 && ms != 16)
         return MOTOR_ERR_PARAM;
 
-    // MS1-3 真值表
+    // MS1-3 truth table
     // Full:  LLL, Half: HLL, Quarter: LHL, Eighth: HHL, Sixteenth: HHH
     int levels[3];
     switch (ms) {

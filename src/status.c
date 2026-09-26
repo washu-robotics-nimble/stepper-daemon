@@ -9,6 +9,7 @@ static const char *cmd_type_name(command_type_t type)
         case CMD_TYPE_ABS:   return "abs";
         case CMD_TYPE_STOP:  return "stop";
         case CMD_TYPE_SPEED: return "speed";
+        case CMD_TYPE_ACCEL: return "accel";
         case CMD_TYPE_MICRO: return "micro";
         case CMD_TYPE_POS:   return "pos";
         case CMD_TYPE_STATUS:return "status";
@@ -53,6 +54,9 @@ int status_get_string(motor_t *motor, char *buf, size_t buf_size)
             case CMD_TYPE_SPEED:
                 snprintf(cmd_desc, sizeof(cmd_desc), "speed %d", cs.current_cmd.args.speed);
                 break;
+            case CMD_TYPE_ACCEL:
+                snprintf(cmd_desc, sizeof(cmd_desc), "accel %d", cs.current_cmd.args.accel);
+                break;
             case CMD_TYPE_MICRO:
                 snprintf(cmd_desc, sizeof(cmd_desc), "micro %d", cs.current_cmd.args.microsteps);
                 break;
@@ -62,11 +66,19 @@ int status_get_string(motor_t *motor, char *buf, size_t buf_size)
         }
     }
 
+    // Current accel limit, so it's visible whether ramping is active
+    char accel_desc[32];
+    if (motor->accel > 0)
+        snprintf(accel_desc, sizeof(accel_desc), "%d", motor->accel);
+    else
+        snprintf(accel_desc, sizeof(accel_desc), "off");
+
     int n = snprintf(buf, buf_size,
-                     "State: %s | Pos: %s%d | Cmd: %s | Last: %s%s",
+                     "State: %s | Pos: %s%d | Accel: %s | Cmd: %s | Last: %s%s",
                      state_str,
                      pos_valid ? "" : "INVALID ",
                      pos_valid ? pos : 0,
+                     accel_desc,
                      cmd_desc,
                      cs.last_result == CMD_OK ? "OK" : cs.last_error,
                      cs.last_result == CMD_OK ? "" : "");

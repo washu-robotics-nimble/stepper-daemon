@@ -14,6 +14,7 @@ typedef struct {
     int microsteps;                         // 1, 2, 4, 8, 16 microsteps per full step.
     int default_speed;                      // Full steps / second.
     int pulse_width_us;                     // STEP HIGH width (us).
+    int max_accel;                          // Full steps / second^2. 0 disables ramping.
 
     char dir_polarity;                      // 'H': Forward=HIGH; 'L': Forward=LOW.
 

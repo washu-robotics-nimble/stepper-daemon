@@ -1,8 +1,8 @@
 CC = gcc
 CFLAGS = -Wall -O2 -std=c11
-LDFLAGS = -llgpio -lpthread
+LDFLAGS = -llgpio -lpthread -lm
 
-SRC = src/main.c src/config.c src/motor.c src/command.c src/status.c src/cli.c lib/inih/ini.c
+SRC = src/main.c src/config.c src/motor.c src/ramp.c src/command.c src/status.c src/cli.c lib/inih/ini.c
 OBJ = $(SRC:.c=.o)
 
 TARGET = motor_demo

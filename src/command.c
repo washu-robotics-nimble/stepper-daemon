@@ -24,7 +24,7 @@ command_result_t command_parse(const char *line, command_t *cmd,
 {
     if (!line || !cmd) return CMD_ERR_SYNTAX;
 
-    // 跳过前导空白
+    // Skip leading whitespaces
     while (*line == ' ' || *line == '\t') line++;
     if (*line == '\0' || *line == '\n') return CMD_ERR_SYNTAX;
 
@@ -34,7 +34,7 @@ command_result_t command_parse(const char *line, command_t *cmd,
         return CMD_ERR_SYNTAX;
     }
 
-    // 转为小写以便不区分大小写
+    // Eliminate need to check cases
     for (char *p = name; *p; p++) *p = tolower(*p);
 
     cmd->type = CMD_TYPE_UNKNOWN;
@@ -65,6 +65,15 @@ command_result_t command_parse(const char *line, command_t *cmd,
         }
         cmd->type = CMD_TYPE_SPEED;
         cmd->args.speed = speed;
+    } else if (strcmp(name, "accel") == 0) {
+        int accel;
+        if (sscanf(line, "%*s %d", &accel) != 1 || accel < 0) {
+            if (errbuf) snprintf(errbuf, errbuf_size,
+                                 "Usage: accel <full steps/s^2, 0=off>");
+            return CMD_ERR_PARAM;
+        }
+        cmd->type = CMD_TYPE_ACCEL;
+        cmd->args.accel = accel;
     } else if (strcmp(name, "micro") == 0) {
         int ms;
         if (sscanf(line, "%*s %d", &ms) != 1) {
@@ -148,6 +157,17 @@ command_result_t command_run(motor_t *motor, const command_t *cmd,
             motor_ret = motor_set_speed(motor, cmd->args.speed);
             ret = motor_to_cmd_result(motor_ret);
             if (response) snprintf(response, resp_size, "Speed set to %d", cmd->args.speed);
+            break;
+
+        case CMD_TYPE_ACCEL:
+            motor_ret = motor_set_accel(motor, cmd->args.accel);
+            ret = motor_to_cmd_result(motor_ret);
+            if (response) {
+                if (cmd->args.accel == 0)
+                    snprintf(response, resp_size, "Accel limit disabled");
+                else
+                    snprintf(response, resp_size, "Accel set to %d", cmd->args.accel);
+            }
             break;
 
         case CMD_TYPE_MICRO:
@@ -247,6 +267,7 @@ const char *command_help(void)
            "  abs <pos>      - move absolute position\n"
            "  stop           - emergency stop\n"
            "  speed <val>    - set speed (full steps/sec)\n"
+           "  accel <val>    - set max acceleration (full steps/sec^2, 0=off)\n"
            "  micro <1|2|4|8|16> - set microstep\n"
            "  pos            - show current position\n"
            "  status         - show full status\n"

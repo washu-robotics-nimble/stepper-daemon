@@ -38,6 +38,8 @@ static int handler(void* user, const char* section, const char* name,
         cfg->default_speed = atoi(value);
     } else if (MATCH("motion", "pulse_width_us")) {
         cfg->pulse_width_us = atoi(value);
+    } else if (MATCH("motion", "max_accel")) {
+        cfg->max_accel = atoi(value);
     } else if (MATCH("motion", "dir_polarity")) {
         cfg->dir_polarity = value[0];  // 'H' or 'L'
     } else if (MATCH("limits", "soft_limit_min")) {
@@ -67,6 +69,7 @@ int config_load(const char *filename, motor_config_t *cfg)
     cfg->microsteps = 16;
     cfg->default_speed = 200;
     cfg->pulse_width_us = 10;
+    cfg->max_accel = 0;          // 0 = ramping disabled (instant start/stop)
     cfg->dir_polarity = 'H';
 
     if (ini_parse(filename, handler, cfg) < 0) {
@@ -86,6 +89,10 @@ int config_load(const char *filename, motor_config_t *cfg)
     }
     if (cfg->pulse_width_us < 2) {
         fprintf(stderr, "Config: Pulse width too small\n");
+        return -1;
+    }
+    if (cfg->max_accel < 0) {
+        fprintf(stderr, "Config: Invalid max_accel\n");
         return -1;
     }
     return 0;
