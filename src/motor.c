@@ -121,6 +121,7 @@ int motor_init(motor_t *motor, const motor_config_t *cfg)
     atomic_init(&motor->position, 0);
     atomic_init(&motor->position_valid, true); // Initially valid (FIXME: limit switch)
     atomic_init(&motor->moving, false);
+    atomic_init(&motor->locked, true);  // ENABLE was claimed LOW above
     atomic_init(&motor->stop_requested, false);
     atomic_init(&motor->cmd_type, 0);
     atomic_init(&motor->cmd_done, true);
@@ -399,6 +400,11 @@ int motor_is_moving(motor_t *motor)
     return atomic_load(&motor->moving);
 }
 
+int motor_is_locked(motor_t *motor)
+{
+    return atomic_load(&motor->locked);
+}
+
 int motor_get_position(motor_t *motor, int32_t *pos)
 {
     if (!atomic_load(&motor->position_valid)) {
@@ -458,11 +464,15 @@ int motor_set_pulse_width(motor_t *motor, int us)
 }
 
 int motor_enable(motor_t *motor) {
-    return lgGpioWrite(motor->handle, motor->enable_pin, 0);
+    int err = lgGpioWrite(motor->handle, motor->enable_pin, 0);
+    if (err >= 0) atomic_store(&motor->locked, true);
+    return err;
 }
 
 int motor_disable(motor_t *motor) {
-    return lgGpioWrite(motor->handle, motor->enable_pin, 1);
+    int err = lgGpioWrite(motor->handle, motor->enable_pin, 1);
+    if (err >= 0) atomic_store(&motor->locked, false);
+    return err;
 }
 
 int motor_sleep(motor_t *motor) {

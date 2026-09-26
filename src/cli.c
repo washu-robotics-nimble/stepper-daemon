@@ -8,17 +8,26 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <unistd.h>
+#include <errno.h>
 #include <sys/ioctl.h>
+#include <sys/select.h>
 
-// ANSI: ESC[2K erase line, ESC[1A cursor up, ESC[0m reset
+// ANSI: ESC[2K erase line, ESC[0m reset, ESC7/ESC8 save/restore cursor
 #define CLEAR_LINE "\r\033[2K"
-#define BAR_STYLE  "\033[48;5;238m\033[38;5;252m"
-#define BAR_LABEL  "\033[1m MOTOR \033[22m"
+#define CUR_UP     "\033[1A"
+#define CUR_DOWN   "\033[1B"   // unlike \n this never scrolls
+#define CUR_SAVE   "\0337"
+#define CUR_RESTORE "\0338"
+#define BAR_INDENT 1           // Leading space before the status text
 #define SGR_RESET  "\033[0m"
+
+// How often to repaint the bar while idle at the prompt
+#define REFRESH_MS 500
 
 static motor_t *g_motor = NULL;
 static volatile int g_running = 1;
 static int g_show_status = 1;
+static status_watch_t g_watch;   // Tracks what the bar currently shows
 
 static void sigint_handler(int sig)
 {
@@ -54,26 +63,85 @@ static int term_width(void)
     return 80;
 }
 
-// Draw the status bar on the line below the prompt, 
-// then come back up and print the prompt.
-static void draw_bar_and_prompt(void)
+// Bar colours follow the motor state
+static const char *bar_style(status_state_t state)
 {
-    char status[256];
-    if (status_get_string(g_motor, status, sizeof(status)) < 0) {
-        snprintf(status, sizeof(status), "status unavailable");
+    switch (state) {
+        case STATUS_RUNNING: return "\033[48;5;23m\033[38;5;159m";  // teal
+        case STATUS_ERROR:   return "\033[48;5;52m\033[38;5;217m";  // red
+        default:             return "\033[48;5;238m\033[38;5;252m"; // grey
+    }
+}
+
+// Paint the bar over the line the cursor is currently on
+static void put_bar(const status_t *st)
+{
+    char text[256];
+    if (status_format(st, text, sizeof(text)) < 0) {
+        snprintf(text, sizeof(text), "status unavailable");
     }
 
     // Stop one column short of the edge so the bar never wraps
-    int width = term_width() - 1;
-    int avail = width - 8;               // " MOTOR "
+    int avail = term_width() - 1 - BAR_INDENT;
     if (avail < 0) avail = 0;
-    if ((int)strlen(status) > avail) status[avail] = '\0';
-    int pad = avail - (int)strlen(status);
+    int len = (int)strlen(text);
+    if (len > avail) len = avail;
+
+    printf("%s %.*s%*s" SGR_RESET,
+           bar_style(status_state(st)), avail, text, avail - len, "");
+}
+
+// Open a fresh bar line below the cursor,
+// then come back up and print the prompt.
+static void draw_bar_and_prompt(void)
+{
+    status_t st;
+    status_watch_poll(&g_watch, g_motor, &st);   // repaint regardless of change
 
     printf("\n" CLEAR_LINE);             // step down onto the bar line
-    printf(BAR_STYLE BAR_LABEL " %s%*s" SGR_RESET, status, pad, "");
-    printf("\033[1A" CLEAR_LINE "> ");   // back up to the prompt line
+    put_bar(&st);
+    printf(CUR_UP CLEAR_LINE "> ");      // back up to the prompt line
     fflush(stdout);
+}
+
+// Repaint the bar while sitting at the prompt. The bar line already exists
+// below us, so nothing here scrolls and the saved cursor stays valid:
+// whatever the user has typed so far is left untouched.
+static void refresh_bar(void)
+{
+    status_t st;
+    if (!status_watch_poll(&g_watch, g_motor, &st)) return;
+
+    printf(CUR_SAVE CUR_DOWN CLEAR_LINE);
+    put_bar(&st);
+    printf(CUR_RESTORE);
+    fflush(stdout);
+}
+
+// Wait until stdin holds a line, repainting the bar meanwhile. This is what
+// keeps the bar live: the motor thread advances position/moving on its own,
+// so an idle prompt still has to poll. Returns 1 when stdin is readable,
+// 0 if we should stop.
+static int wait_for_input(void)
+{
+    while (g_running) {
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(STDIN_FILENO, &rfds);
+        struct timeval tv = { 0, REFRESH_MS * 1000 };
+
+        int rv = select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv);
+        if (rv > 0) return 1;
+        if (rv < 0 && errno != EINTR) return 0;  // select is not restarted on EINTR
+        refresh_bar();
+    }
+    return 0;
+}
+
+// Wipe the prompt line and the bar below it
+static void erase_prompt_and_bar(void)
+{
+    printf(CLEAR_LINE "\n" CLEAR_LINE CUR_UP);
 }
 
 void cli_run(void)
@@ -82,11 +150,21 @@ void cli_run(void)
     char response[512];
     int use_bar = g_show_status && isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
 
+    status_watch_init(&g_watch);
+
+    // Unbuffered stdin: select() only sees the file descriptor, so stdio
+    // must not hold a read-ahead line that would never wake the poll loop.
+    if (use_bar) setvbuf(stdin, NULL, _IONBF, 0);
+
     printf("Motor CLI. Type 'help' for commands.\n");
 
     while (g_running) {
         if (use_bar) {
             draw_bar_and_prompt();
+            if (!wait_for_input()) {     // interrupted or cli_stop()
+                erase_prompt_and_bar();
+                break;
+            }
         } else {
             if (g_show_status) {
                 char status[256];
@@ -99,8 +177,7 @@ void cli_run(void)
         }
 
         if (!fgets(line, sizeof(line), stdin)) {
-            // EOF: erase the prompt and the bar below it
-            if (use_bar) printf(CLEAR_LINE "\n" CLEAR_LINE "\033[1A");
+            if (use_bar) erase_prompt_and_bar();   // EOF
             break;
         }
 

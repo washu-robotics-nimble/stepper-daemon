@@ -205,13 +205,13 @@ command_result_t command_run(motor_t *motor, const command_t *cmd,
         case CMD_TYPE_LOCK:
             motor_ret = motor_lock(motor);
             ret = motor_to_cmd_result(motor_ret);
-            if (response) snprintf(response, resp_size, "Motor locked (disabled)");
+            if (response) snprintf(response, resp_size, "Motor locked (outputs enabled)");
             break;
 
         case CMD_TYPE_UNLOCK:
             motor_ret = motor_unlock(motor);
             ret = motor_to_cmd_result(motor_ret);
-            if (response) snprintf(response, resp_size, "Motor unlocked (enabled)");
+            if (response) snprintf(response, resp_size, "Motor unlocked (outputs disabled)");
             break;
 
         case CMD_TYPE_HELP:
@@ -273,8 +273,8 @@ const char *command_help(void)
            "  status         - show full status\n"
            "  zero           - set current position as zero\n"
            "  home           - home motor (not implemented)\n"
-           "  lock           - disable outputs\n"
-           "  unlock         - enable outputs\n"
+           "  lock           - enable outputs (hold position)\n"
+           "  unlock         - disable outputs (free to spin)\n"
            "  help           - this help\n"
            "  quit/exit      - exit program\n";
 }
