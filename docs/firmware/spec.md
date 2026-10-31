@@ -23,6 +23,8 @@ Same as the daemon: positions in full steps (signed 32-bit), speeds in full step
 ## Inputs and safety
 
 - `F-R20` A triggered endstop MUST stop the affected axis within 2 steps, without host involvement. One endstop is needed first. Homing sequence is triggered by the host and autonomously executed by the firmware. (`F-G3`)
+  - If the endstop has not triggered within the axis's maximum homing travel (fixed in the board table, F-R34), the axis MUST stop, send a `fault` event with code `home_timeout`, and leave position invalid.
+  - `home` on an axis with no endstop in the board table MUST be rejected with `no_endstop`.
 - `F-R21` `stop` MUST cut step signal output within 2 steps of being received. (`F-G3`)
 - `F-R22` The firmware MUST treat the host link as lost when the USB device is disconnected or suspended, when the host closes the port (DTR drop), or when no valid message arrives for a configurable period (default: infinity; the host keeps the link alive with `ping`). On link loss it MUST stop all motion, leave the drivers' ENABLE state unchanged, and report the loss once the link returns (`link_recovered` event). (`F-G5`)
 - `F-R23` On boot or reset, all driver outputs MUST be in a safe state (STEP low; ENABLE high, i.e. driver disabled) until configured. (F-G5)
@@ -71,14 +73,14 @@ Same as the daemon: positions in full steps (signed 32-bit), speeds in full step
   ```
 - `F-R32` The firmware MUST send a state report when a move starts, finishes or is stopped, when a switch changes, and on fault. It SHOULD also send periodic position updates during a move, at a configurable rate. Default: 4 Hz. Reports carry no MCU timestamp; the host timestamps them on receipt. (`F-G4`)
 - `F-R33` The first exchange MUST report the firmware and protocol versions, and a `settings_applied` flag. The flag is false after boot, and becomes true once the host signals that it has sent all settings; state reports also carry it. The daemon refuses a protocol it doesn't support.
-- `F-R34` All behavioural settings MUST be settable over the link, per object (`F-G6`). The hardware layout (which objects exist, their pins and driver wiring) is fixed at build time and MUST NOT be settable over the link. Every object MUST have safe built-in default settings, which apply until (and unless) the host overrides them. Homing direction and homing speed are fixed in the firmware too, so a host can never send a motor into its hard end on the side without an endstop.
+- `F-R34` All behavioural settings MUST be settable over the link, per object (`F-G6`). The hardware layout (which objects exist, their pins and driver wiring) is fixed at build time and MUST NOT be settable over the link. Every object MUST have safe built-in default settings, which apply until (and unless) the host overrides them. Homing direction, homing speed and maximum homing travel are fixed in the firmware too, so a host can never send a motor into its hard end on the side without an endstop.
 - `F-R35` On request, the firmware MUST report every object it has, each with its object ID (`oid`), its type, and the commands it supports. The firmware assigns the `oid`s. (`F-G6`)
   - An `oid` is a short string from the firmware's board table (e.g. `"m0"`, `"lc0"`).
   - `oid`s are part of the external interface (clients and scripts use them, D-R43). Once released, an `oid` MUST NOT be renamed, or reused for a different object.
 
 ## Message catalogue
 
-Envelope and framing as in F-R31. Replies are `{"seq":n,"ack":true,…result fields}`, or `{"seq":n,"ack":false,"err":…}`.
+Envelope and framing as in F-R31. Replies are `{"seq":n,"ack":true,...result fields}`, or `{"seq":n,"ack":false,"err":...}`.
 
 Object types (from the firmware's board table): `stepper`, `endstop`, `hx711`; later `pwm` / `servo` (F-R7, F-R41).
 
@@ -86,25 +88,25 @@ Object types (from the firmware's board table): `stepper`, `endstop`, `hx711`; l
 
 | `cmd` | Args | Result | Notes |
 |---|---|---|---|
-| `identify` | — | `fw`, `proto`, `settings_applied` | F-R33; always the first exchange |
-| `list_objects` | — | `objects` (list of `{oid, type}`), `types` (map: type → list of commands) | F-R35 |
-| `settings_done` | — | — | Sets `settings_applied` (F-R33, D-R3) |
-| `set_link` | `report_hz`, `timeout_ms` | — | F-R32 rate (default 4), F-R22 timeout (0 = infinity) |
-| `ping` | — | — | Keeps the F-R22 timeout alive |
-| `estop` | — | — | F-R24; handled before the queue |
+| `identify` | - | `fw`, `proto`, `settings_applied` | F-R33; always the first exchange |
+| `list_objects` | - | `objects` (list of `{oid, type}`), `types` (map: type → list of commands) | F-R35 |
+| `settings_done` | - | - | Sets `settings_applied` (F-R33, D-R3) |
+| `set_link` | `report_hz`, `timeout_ms` | - | F-R32 rate (default 4), F-R22 timeout (0 = infinity) |
+| `ping` | - | - | Keeps the F-R22 timeout alive |
+| `estop` | - | - | F-R24; handled before the queue |
 
 ### Stepper (`type: stepper`)
 
 | `cmd` | Args | Result | Errors |
 |---|---|---|---|
-| `set_motion` | `oid`, and any of `microsteps`, `speed`, `accel`, `pulse_width_us`, `dir_polarity`, `soft_limit_min`, `soft_limit_max` | — | `busy` (moving), `bad_param` |
-| `move` | `oid`, `steps` (relative) | — | `busy`, `bad_param` (limits, F-R25), `pos_invalid`, `not_configured` |
-| `move_to` | `oid`, `pos` (absolute) | — | same as `move` |
+| `set_motion` | `oid`, and any of `microsteps`, `speed`, `accel`, `pulse_width_us`, `dir_polarity`, `soft_limit_min`, `soft_limit_max` | - | `busy` (moving), `bad_param` |
+| `move` | `oid`, `steps` (relative) | - | `busy`, `bad_param` (limits, F-R25), `pos_invalid`, `not_configured` |
+| `move_to` | `oid`, `pos` (absolute) | - | same as `move` |
 | `stop` | `oid` | `pos` | `not_moving` |
-| `set_enable` | `oid`, `value` (0/1) | — | — |
-| `set_position` | `oid`, `pos` | — | `busy` |
-| `home` | `oid` | — | `busy`, `not_impl`. Direction, speed and endstop are fixed in the board table (F-R34) |
-| `get_state` | `oid` | `pos`, `pos_valid`, `moving`, `enabled`, `settings_applied` | — |
+| `set_enable` | `oid`, `value` (0/1) | - | - |
+| `set_position` | `oid`, `pos` | - | `busy` |
+| `home` | `oid` | - | `busy`, `no_endstop`, `not_impl`. Direction, speed, maximum travel and endstop are fixed in the board table (F-R20, F-R34) |
+| `get_state` | `oid` | `pos`, `pos_valid`, `moving`, `enabled`, `settings_applied` | - |
 
 `not_configured`: motion before `settings_done`.
 
@@ -118,7 +120,7 @@ Object types (from the firmware's board table): `stepper`, `endstop`, `hx711`; l
 
 | `cmd` | Args | Result | Errors |
 |---|---|---|---|
-| `set_hx711` | `oid`, `gain` (128 / 64 / 32) | — | `bad_param` |
+| `set_hx711` | `oid`, `gain` (128 / 64 / 32) | - | `bad_param` |
 | `read` | `oid` | `raw` | `busy` (read in progress) |
 
 `scale`, `offset` and `tare` stay in the daemon; the firmware only reports raw counts (F-R43).
@@ -131,10 +133,10 @@ Object types (from the firmware's board table): `stepper`, `endstop`, `hx711`; l
 | `move_end` | `oid`, `pos`, `reason` (`done` / `stop` / `endstop` / `estop` / `link_lost`) |
 | `position` | `oid`, `pos` (at `report_hz` while moving) |
 | `endstop` | `oid`, `state` |
-| `fault` | `oid` (optional), `code` |
-| `link_recovered` | — Sent once when the link returns after a loss; motion was stopped (F-R22) |
+| `fault` | `oid` (optional), `code` (e.g. `home_timeout`) |
+| `link_recovered` | - Sent once when the link returns after a loss; motion was stopped (F-R22) |
 | `rx_error` | `err` (`too_long` / `bad_json`). Sent for a dropped frame, since its `seq` is unknown; the host's pending request then times out (D-R30) |
 
 ### Error codes
 
-`unknown_cmd`, `unknown_oid`, `bad_param`, `busy`, `not_moving`, `not_configured`, `pos_invalid`, `not_impl`.
+`unknown_cmd`, `unknown_oid`, `bad_param`, `busy`, `not_moving`, `not_configured`, `pos_invalid`, `no_endstop`, `not_impl`.

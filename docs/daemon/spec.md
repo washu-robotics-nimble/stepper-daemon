@@ -50,6 +50,7 @@ To ensure precision and consistency, units are in:
 - `D-R41` Every request MUST get exactly one reply, echoing the request's `seq`. Replies and events MAY interleave on the same connection. (`D-G2`)
 - `D-R42` Receivers MUST ignore unknown fields. (`D-G2`)
 - `D-R43` Devices are the objects the firmware reports (F-R35), named by their `oid` (e.g. `m0`, `lc0`). What is installed is known only from that query. The INI has one section per device, named by its `oid` (e.g. `[m0]`, `[lc0]`); there are no per-type defaults. A section for an `oid` the firmware doesn't report is ignored with a log line. The section names `daemon` and `link` are reserved for daemon settings and are never used as `oid`s. (`D-G1`)
+- `D-R44` A stepper's INI section MUST state whether an endstop is installed (`endstop = true` / `false`; missing means `false`). The daemon MUST reject `home` with `no_endstop`, without sending it to the firmware, unless the INI says an endstop is installed; the firmware rejects it in turn if its board table has none (F-R20). (`D-G1`)
 
 Envelope:
 
@@ -87,6 +88,7 @@ Error codes:
 | `not_moving` | `stop` with no move in progress |
 | `pos_invalid` | Absolute move while position is invalid |
 | `link_down` | MCU link down, or config not yet re-sent (D-R30) |
+| `no_endstop` | `home` on an axis without an endstop, in the INI or in the firmware (D-R44) |
 | `not_impl` | Command defined but not implemented yet |
 
 ## Commands
@@ -105,7 +107,7 @@ Arguments are listed in braces as JSON keys. Results are returned as keys in the
 | `speed` / `accel` / `micro` {`value`} | write | Set a parameter (rejected when moving) | lease held, busy, bad parameter |
 | `pos` / `status` | read | Report state | n/a |
 | `zero` | write | Set the current position to 0 | lease held |
-| `home` | write | Run the homing sequence | lease held, not implemented yet |
+| `home` | write | Run the homing sequence | lease held, no endstop, not implemented yet |
 | `lock` / `unlock` | write | Enable or disable the driver output | lease held |
 
 ### Load sensor device
