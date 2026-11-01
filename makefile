@@ -1,11 +1,5 @@
 CC = gcc
 CFLAGS = -Wall -O2 -std=c11
-LDFLAGS = -llgpio -lpthread -lm
-
-SRC = src/main.c src/config.c src/motor.c src/ramp.c src/command.c src/status.c src/cli.c lib/inih/ini.c
-OBJ = $(SRC:.c=.o)
-
-TARGET = motor_demo
 
 # Host unit tests: each tests/test_*.c is one standalone program, linked
 # with the SDK-independent firmware modules
@@ -15,13 +9,9 @@ TEST_LIB = lib/cJSON/cJSON.c \
            src/firmware/linebuf.c src/firmware/linequeue.c src/firmware/hostlink.c src/firmware/board_table.c \
            src/firmware/stepper.c src/firmware/planner.c tests/dummy_stepgen.c tests/dummy_board.c
 
-all: $(TARGET)
-
-$(TARGET): $(OBJ)
-	$(CC) -o $@ $^ $(LDFLAGS)
-
-%.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+# The daemon (stepperd) comes with build plan step 8; until then, the
+# default target runs the host tests
+all: test
 
 test: $(TEST_BIN)
 	@for t in $(TEST_BIN); do ./$$t || exit 1; done
@@ -32,7 +22,6 @@ build/tests/%: tests/%.c $(TEST_LIB) $(wildcard tests/*.h src/firmware/*.h)
 	$(CC) $(CFLAGS) -Ilib/cJSON -Isrc/firmware -Itests -o $@ $< $(TEST_LIB) -lm
 
 clean:
-	rm -f $(TARGET) $(OBJ)
 	rm -rf build
 
 .PHONY: all clean test

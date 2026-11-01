@@ -90,7 +90,7 @@ Safe state at boot: STEP low and ENABLE high (F-R23). F-R23 doesn't specify the 
 - Board layout (F-R34, F-R35): a compiled-in table of the board's objects (`oid`, type, pins, wiring, safe default settings; for steppers also the attached endstop, homing direction and homing speed). One table per board build.
   - **Never rename or reuse an existing `oid`** in this table: clients and scripts address objects by it. Retire an object by deleting its entry; a new object gets a new `oid`.
 - Step generation (F-R1–F-R4, F-R6): one PIO state machine per axis, timing **every step individually**. For each step it pulls a word from its TX FIFO, drives STEP high for the fixed high time (`pulse_width_us`), drives it low, then counts down that step's period. Resolution is one PIO clock (8 ns at 125 MHz), and timing doesn't depend on the CPU or USB traffic (F-R3).
-  - During acceleration and deceleration, one word is one step, so the ramp is smooth rather than a staircase of constant-speed segments (the lg limitation in the old `src/ramp.c`).
+  - During acceleration and deceleration, one word is one step, so the ramp is smooth rather than a staircase of constant-speed segments (the lg limitation in the old `src/ramp.c`, since removed).
   - During cruise, the period is constant, so the planner sends a single "N steps at period P" word to save CPU.
   - DIR is set, and held, around the move with the A4988 setup and hold margins (F-R4).
 - Ramps (F-R5): a new per-step planner runs on core 1. Core 0 handles USB, framing and command dispatch.

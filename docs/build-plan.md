@@ -184,7 +184,7 @@ Questions are at the end; answer them as before.
 
 ### 18. Cleanup
 
-- Delete the pre-migration code (`src/*.c` superseded by `src/daemon`, `src/motordriver.c`, `lib/lg/`, `lg-master/`), and the old `makefile` targets.
+- Delete the pre-migration code (`src/*.c` superseded by `src/daemon`). Done early, on 2026-11-01: `lib/lg/`, `lg-master/`, the lg-only `src/motor.c`, `src/motordriver.c` and `src/ramp.c`, and the `motor_demo` target.
 - Rewrite the top-level `README.md` (build, flash, run).
 - Bring both `impl.md` files' "Current state" up to date and empty their "Known gaps".
 
