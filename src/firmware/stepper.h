@@ -22,4 +22,8 @@ void stepper_poll(uint32_t now_ms);
 // axis gets a move_end with reason "estop" from the next poll.
 void stepper_estop(void);
 
+// Link lost (F-R22): stop every moving axis as stop does, ending on a full
+// step, with reason "link_lost". ENABLE and the positions stay as they are.
+void stepper_link_lost(void);
+
 #endif

@@ -7,7 +7,8 @@ Usage:
 
 Runs the handshake (identify, list_objects, settings, settings_done), then
 every stepper command with its success and error cases, including moves of
-a few seconds. Prints each check and a summary; exits non-zero if any check
+a few seconds, soft limits, and link loss (a timeout, and the port closed
+and reopened). Prints each check and a summary; exits non-zero if any check
 failed. It ends with the board defaults restored, except that settings_done
 stays sent, the driver is disabled and the position is invalid (after the
 estop check).
@@ -17,6 +18,7 @@ seen settings_done already, they are skipped.
 """
 
 import json
+import os
 import sys
 import time
 
@@ -27,6 +29,7 @@ REPLY_TIMEOUT_S = 2.0
 
 class Board:
     def __init__(self, path, oid):
+        self.path = path
         self.link = Link(open_port(path), echo=False)
         self.oid = oid
         self.events = []    # not yet taken by wait_event()
@@ -64,6 +67,12 @@ class Board:
             if left <= 0:
                 return None
             self._receive(min(left, 0.1))
+
+    def reopen(self, closed_s):
+        """Close the port (DTR drops), wait, and open it again."""
+        os.close(self.link.fd)
+        time.sleep(closed_s)
+        self.link = Link(open_port(self.path), echo=False)
 
     def drain(self, seconds):
         end = time.monotonic() + seconds
@@ -131,8 +140,6 @@ def main():
                    {"dir_polarity": "X"}, {"speed": 100000, "microsteps": 16},
                    {"microsteps": 1, "speed": -1}):
         check(f"set_motion {fields}: bad_param", err(b.call("set_motion", **fields), "bad_param"))
-    check("set_motion soft limit: not_impl",
-          err(b.call("set_motion", soft_limit_max=100), "not_impl"))
     check("set_motion, all fields", acked(b.call(
         "set_motion", microsteps=1, speed=200, accel=400, pulse_width_us=20, dir_polarity="H")))
     check("set_link report_period -1: bad_param",
@@ -218,6 +225,54 @@ def main():
     check("get_state: disabled, position invalid",
           r.get("enabled") is False and r.get("pos_valid") is False, r)
     run_move(b, "move after estop (not latched)", r.get("pos", 0) + 1, steps=1)
+
+    print("-- soft limits")
+    check("set_position 50", acked(b.call("set_position", pos=50)))
+    check("set_motion soft limits [0, 100]",
+          acked(b.call("set_motion", soft_limit_min=0, soft_limit_max=100)))
+    check("soft limit min > max: bad_param",
+          err(b.call("set_motion", soft_limit_min=200), "bad_param"))
+    check("move past max: bad_param", err(b.call("move", steps=51), "bad_param"))
+    check("move_to below 0: bad_param", err(b.call("move_to", pos=-1), "bad_param"))
+    run_move(b, "move_to 100 (on the bound)", 100, pos=100)
+    check("set_enable 0", acked(b.call("set_enable", value=0)))
+    check("move with limits, position invalid: pos_invalid",
+          err(b.call("move", steps=-1), "pos_invalid"))
+    check("clear soft limits with null",
+          acked(b.call("set_motion", soft_limit_min=None, soft_limit_max=None)))
+    run_move(b, "move without limits, position invalid", 99, steps=-1)
+    check("set_position 0, set_enable 1",
+          acked(b.call("set_position", pos=0)) and acked(b.call("set_enable", value=1)))
+
+    print("-- link loss")
+    check("set_link timeout_ms 500", acked(b.call("set_link", obj=False, timeout_ms=500)))
+    b.call("move", steps=2000)
+    b.wait_event("move_start", 2)
+    end = b.wait_event("move_end", 2)   # no frames sent meanwhile
+    check("no frame for 500 ms: move_end, reason link_lost",
+          end is not None and end["reason"] == "link_lost", end)
+    r = b.call("get_state")   # brings the link back
+    rec = b.wait_event("link_recovered", 0.5)
+    check("next frame: link_recovered", rec is not None)
+    check("after the timeout: stopped, enabled, position valid at move_end",
+          r.get("moving") is False and r.get("enabled") is True and r.get("pos_valid") is True
+          and end is not None and r.get("pos") == end["pos"], r)
+    check("set_link timeout_ms 0", acked(b.call("set_link", obj=False, timeout_ms=0)))
+    run_move(b, "move_to 0", 0, pos=0)
+
+    b.call("move", steps=2000)
+    b.wait_event("move_start", 2)
+    b.drain(1.0)
+    b.reopen(1.0)
+    rec = b.wait_event("link_recovered", 1.0)
+    check("port closed and reopened during a move: link_recovered", rec is not None)
+    r = b.call("get_state")
+    check("after the close: stopped, enabled, position valid",
+          r.get("moving") is False and r.get("enabled") is True and r.get("pos_valid") is True, r)
+    pos = r.get("pos")
+    time.sleep(0.5)
+    check("position unchanged since", b.call("get_state").get("pos") == pos)
+    run_move(b, "move_to 0", 0, pos=0)
 
     print("-- errors")
     check("unknown oid", err(b.call("get_state", obj=False, oid="zz9"), "unknown_oid"))

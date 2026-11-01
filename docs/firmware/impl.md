@@ -4,7 +4,7 @@ How the firmware meets [spec.md](spec.md). Update this file in the same commit a
 
 ## Current state (2026-11-01)
 
-Build plan step 6: safe boot state, host-link framing, the global commands `identify`, `list_objects`, `settings_done`, `set_link`, `ping`, `estop`, and the stepper commands `set_motion`, `move` and `move_to` (trapezoid ramps), `stop`, `set_enable`, `set_position` and `get_state`, with `move_start` / `move_end` / `position` events and `fault` events for late steps.
+Build plan step 7: safe boot state, host-link framing, the global commands `identify`, `list_objects`, `settings_done`, `set_link`, `ping`, `estop`, and the stepper commands `set_motion`, `move` and `move_to` (trapezoid ramps), `stop`, `set_enable`, `set_position` and `get_state`, with `move_start` / `move_end` / `position` events and `fault` events for late steps; soft limits, and link-loss handling with `link_recovered`.
 
 | File | Role |
 |---|---|
@@ -15,7 +15,7 @@ Build plan step 6: safe boot state, host-link framing, the global commands `iden
 | `board.c` | `board_safe_init()`: driver pins to their safe state. `board_set_enable()`: driver ENABLE, waking the driver first (below). `board_set_microsteps()`: MS1–MS3 |
 | `linebuf.c` / `.h` | Line assembler (F-R31). A line is at most 1024 bytes including its `\n`; an over-length line is dropped and reported once at its `\n`. Pure C |
 | `linequeue.c` / `.h` | Received lines waiting for dispatch, 8 slots (F-R24, below). Pure C |
-| `hostlink.c` / `.h` | Frame decoding, dispatch tables (global commands; per-type object commands), replies and `rx_error` events (F-R31, F-R33, F-R35), the test for an `estop` line, and the link settings (`settings_applied`, `report_period`, `timeout_ms`). Writes through a callback. Pure C |
+| `hostlink.c` / `.h` | Frame decoding, dispatch tables (global commands; per-type object commands), replies and `rx_error` events (F-R31, F-R33, F-R35), the test for an `estop` line, the link settings (`settings_applied`, `report_period`, `timeout_ms`) and link-loss state (F-R22). Writes through a callback. Pure C |
 | `version.h` | Firmware version for `identify` |
 | `main.c` | Calls `board_safe_init()` first (F-R23), then sets up the step generators (which starts core 1) and runs core 0's main loop: TinyUSB, received bytes through the line assembler into the line queue, one queued line to the dispatcher, then `stepper_poll()` |
 | `usb_descriptors.c`, `tusb_config.h` | TinyUSB used directly (not the SDK's `stdio_usb`), one CDC interface (F-R30). Development VID/PID `2E8A:000A`. The USB serial number is the flash unique ID, so `/dev/serial/by-id/` gives each board a stable path |
@@ -62,11 +62,17 @@ Stop and emergency stop (F-R1, F-R21, F-R24):
 
 Settings and state (F-R10, F-R32–F-R34):
 - `settings_applied` is a flag in `hostlink.c`: false from boot, set by `settings_done`, and never cleared. Before it, `move` and `move_to` get `not_configured`; every other command works.
-- Each object starts with the board table's defaults (F-R34). `set_motion` checks every field, then the resulting combination with the same timing check a move uses, before applying anything; while the axis is moving it is refused with `busy`. A new `microsteps` value drives MS1–MS3 at once (the axis is idle). `soft_limit_min` / `soft_limit_max` get `not_impl` until build plan step 7.
-- `set_link` stores `timeout_ms`, which takes effect with link-loss handling in build plan step 7.
+- Each object starts with the board table's defaults (F-R34). `set_motion` checks every field, then the resulting combination with the same timing check a move uses, before applying anything; while the axis is moving it is refused with `busy`. A new `microsteps` value drives MS1–MS3 at once (the axis is idle).
+- Soft limits (F-R25) are part of the motion settings: a flag and a value per side, so `0` is a real limit and `null` clears one. A move checks, in this order: `not_configured`, `busy`, `pos_invalid` (any limit set and the position invalid), then the target against the int32 range and the limits (`bad_param`).
 - The live position (`get_state` and `position` events) is the move's start plus the steps counted so far, in whole full steps toward the start. `position` events go out from `stepper_poll()` every `report_period` ms after `move_start`, with no lower bound on the period.
 - `move_to` is a relative move of `pos` minus the current position, with the same checks.
 - Positions are int32 full steps, and one move is at most 2^31 steps (one repeat word), so at 1/16 a move can't exceed 2^27 full steps.
+
+Link loss (F-R22):
+- `main.c` reports the link as up when the USB device is mounted, not suspended, and the host has the port open (`tud_cdc_connected()`, i.e. DTR). It does so on every pass of the main loop, before any line is read, so `link_recovered` comes ahead of every reply. A DTR drop seen through the line-state callback is reported as down first, so a close and reopen between two passes is still a loss.
+- `hostlink.c` keeps the link state, pure C. It gets the time from `hostlink_tick()`, once per pass. A loss calls `stepper_link_lost()`, which stops each moving axis through the same path as `stop` (`reason: link_lost`); a `stop` already pending keeps its reason. `link_recovered` is sent once per loss, however many causes overlapped (e.g. a timeout, then the port closed).
+- The `timeout_ms` clock runs from the last frame that got a reply, and starts over when the port opens. While the link is down for another reason, the timeout doesn't apply.
+- Host tests: `tests/test_link.c`. On the board, `tests/check_commands.py` checks the timeout, and closes and reopens the port during a move.
 
 Driver enable (F-R10): `set_enable 1` first wakes the driver if SLEEP or RESET is low: RESET and SLEEP high, then 1 ms (the A4988's wake-up time before stepping), then ENABLE low. `set_enable 0` and `estop` only drive ENABLE high; SLEEP and RESET stay high from then on. Both also mark the position invalid (spec).
 
@@ -105,7 +111,7 @@ Safe state at boot: STEP low and ENABLE high (F-R23). F-R23 doesn't specify the 
 
 ## Known gaps
 
-All of it beyond build plan step 6. Limitations of what is built:
+All of it beyond build plan step 7. Limitations of what is built:
 
 - **PIO state machines.** Each stepper takes one PIO0 state machine (step generator) and one PIO1 state machine (step counter). With 4 steppers PIO1 is full, which leaves none for the HX711 reader (build plan step 17). This board has one stepper.
 - **`estop` and unread input (F-R24).** `estop` overtakes only the lines already read from USB. With the 8-slot line queue full, nothing more is read until one queued line is dispatched, so an `estop` behind them waits for that. While a reply is blocked on a full USB TX buffer (a host that doesn't read), no input is read at all.

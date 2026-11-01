@@ -13,6 +13,8 @@ typedef struct {
     uint32_t pulse_width_us;  // STEP high time
     uint32_t microsteps;      // 1, 2, 4, 8 or 16
     bool     dir_forward_high; // dir_polarity: DIR level for positive moves
+    bool     has_min, has_max; // soft limits set (F-R25)
+    int32_t  limit_min, limit_max;
 } motion_t;
 
 // A move's timing, from its motion settings
@@ -155,8 +157,15 @@ static const char *start_move(size_t i, int64_t steps)
     if (a->moving)
         return "busy";
 
+    // Soft limits (F-R25): with any set, they need a valid position
+    const motion_t *m = &a->motion;
+    if ((m->has_min || m->has_max) && !a->pos_valid)
+        return "pos_invalid";
+
     int64_t target = (int64_t)a->pos + steps;
     if (target < INT32_MIN || target > INT32_MAX)
+        return "bad_param";
+    if ((m->has_min && target < m->limit_min) || (m->has_max && target > m->limit_max))
         return "bad_param";
 
     if (steps != 0) {
@@ -193,6 +202,13 @@ void stepper_estop(void)
         board_set_enable(i, false);
         a->enabled = false;
     }
+}
+
+void stepper_link_lost(void)
+{
+    for (size_t i = 0; i < board_stepper_count; i++)
+        if (axes[i].moving && axes[i].end_reason == NULL)
+            halt(i, "link_lost", true);
 }
 
 // ---- Events -----
@@ -267,6 +283,24 @@ void stepper_poll(uint32_t now_ms)
 
 // ---- Commands -----
 
+// A soft limit field: absent leaves it, null clears it, an int32 sets it.
+// False if it is anything else.
+static bool get_limit(const cJSON *req, const char *key, bool *has, int32_t *value)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(req, key);
+
+    if (item == NULL)
+        return true;
+    if (cJSON_IsNull(item)) {
+        *has = false;
+        return true;
+    }
+    if (!hostlink_get_int32(req, key, value))
+        return false;
+    *has = true;
+    return true;
+}
+
 static const char *cmd_set_motion(const cJSON *req, cJSON *reply, size_t index)
 {
     (void)reply;
@@ -276,10 +310,6 @@ static const char *cmd_set_motion(const cJSON *req, cJSON *reply, size_t index)
 
     if (a->moving)
         return "busy";
-    // Soft limits (F-R25) come with build plan step 7
-    if (cJSON_GetObjectItemCaseSensitive(req, "soft_limit_min") != NULL
-        || cJSON_GetObjectItemCaseSensitive(req, "soft_limit_max") != NULL)
-        return "not_impl";
 
     // All fields are checked before any is applied
     v = (int32_t)m.microsteps;
@@ -311,6 +341,12 @@ static const char *cmd_set_motion(const cJSON *req, cJSON *reply, size_t index)
         else
             return "bad_param";
     }
+
+    if (!get_limit(req, "soft_limit_min", &m.has_min, &m.limit_min)
+        || !get_limit(req, "soft_limit_max", &m.has_max, &m.limit_max))
+        return "bad_param";
+    if (m.has_min && m.has_max && m.limit_min > m.limit_max)
+        return "bad_param";
 
     // The combination too: settings no move could run with are refused now
     timing_t t;

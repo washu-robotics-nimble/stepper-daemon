@@ -448,9 +448,6 @@ static void test_set_motion(void)
     }
     assert(dummy_microsteps[0] == 16);
 
-    // Soft limits come in step 7
-    send_line("{\"seq\":55,\"cmd\":\"set_motion\",\"oid\":\"m0\",\"soft_limit_min\":0}");
-    expect_reply("not_impl");
 
     // Back to the defaults for the tests after this
     send_line("{\"seq\":56,\"cmd\":\"set_motion\",\"oid\":\"m0\",\"microsteps\":1,"
@@ -652,6 +649,80 @@ static void test_stop_on_full_step(void)
     expect_reply(NULL);
 }
 
+static void move_reply(const char *fields, const char *err)
+{
+    char line[200];
+    snprintf(line, sizeof line, "{\"seq\":100,\"oid\":\"m0\",%s}", fields);
+    send_line(line);
+    expect_reply(err);
+}
+
+static void test_soft_limits(void)
+{
+    // Position invalid (after the estop above), no limits: moves are allowed
+    move_reply("\"cmd\":\"get_state\"", NULL);
+    assert(!reply_bool("pos_valid"));
+    move_reply("\"cmd\":\"move\",\"steps\":0", NULL);
+    poll();
+
+    // With a limit set, an invalid position refuses motion (F-R25)
+    move_reply("\"cmd\":\"set_motion\",\"soft_limit_min\":0", NULL);
+    move_reply("\"cmd\":\"move\",\"steps\":1", "pos_invalid");
+    move_reply("\"cmd\":\"move_to\",\"pos\":1", "pos_invalid");
+    move_reply("\"cmd\":\"set_position\",\"pos\":50", NULL);
+    move_reply("\"cmd\":\"set_motion\",\"soft_limit_max\":100", NULL);
+
+    // Targets outside [0, 100] are refused; on the bounds they are fine
+    move_reply("\"cmd\":\"move\",\"steps\":51", "bad_param");
+    move_reply("\"cmd\":\"move\",\"steps\":-51", "bad_param");
+    move_reply("\"cmd\":\"move_to\",\"pos\":101", "bad_param");
+    move_reply("\"cmd\":\"move_to\",\"pos\":-1", "bad_param");
+    move_reply("\"cmd\":\"move\",\"steps\":50", NULL);
+    poll();
+    finish(100);
+    move_reply("\"cmd\":\"move_to\",\"pos\":0", NULL);
+    poll();
+    finish(0);
+
+    // Outside the limits (set_position may go there): only targets count,
+    // so moving back in is allowed, and staying out is not
+    move_reply("\"cmd\":\"set_position\",\"pos\":-20", NULL);
+    move_reply("\"cmd\":\"move\",\"steps\":0", "bad_param");
+    move_reply("\"cmd\":\"move\",\"steps\":-1", "bad_param");
+    move_reply("\"cmd\":\"move\",\"steps\":30", NULL);
+    poll();
+    finish(10);
+
+    // min above max, and values that are neither int32 nor null; nothing
+    // applies, including the valid fields alongside
+    move_reply("\"cmd\":\"set_motion\",\"soft_limit_min\":101", "bad_param");
+    move_reply("\"cmd\":\"set_motion\",\"soft_limit_min\":50,\"soft_limit_max\":40", "bad_param");
+    move_reply("\"cmd\":\"set_motion\",\"soft_limit_max\":\"100\"", "bad_param");
+    move_reply("\"cmd\":\"set_motion\",\"soft_limit_max\":1.5", "bad_param");
+    move_reply("\"cmd\":\"set_motion\",\"soft_limit_max\":2147483648", "bad_param");
+    move_reply("\"cmd\":\"set_motion\",\"soft_limit_max\":null,\"speed\":0", "bad_param");
+    move_reply("\"cmd\":\"move\",\"steps\":91", "bad_param");
+    // 0 is a real limit
+    move_reply("\"cmd\":\"move_to\",\"pos\":-1", "bad_param");
+
+    // null clears one side, then the other
+    move_reply("\"cmd\":\"set_motion\",\"soft_limit_max\":null", NULL);
+    move_reply("\"cmd\":\"move\",\"steps\":1000", NULL);
+    poll();
+    finish(1010);
+    move_reply("\"cmd\":\"move_to\",\"pos\":-1", "bad_param");
+    move_reply("\"cmd\":\"set_motion\",\"soft_limit_min\":null", NULL);
+    move_reply("\"cmd\":\"move_to\",\"pos\":-1", NULL);
+    poll();
+    finish(-1);
+
+    // No limits: an invalid position no longer matters
+    move_reply("\"cmd\":\"set_enable\",\"value\":0", NULL);
+    move_reply("\"cmd\":\"move\",\"steps\":1", NULL);
+    poll();
+    finish(0);
+}
+
 static void test_listed(void)
 {
     send_line("{\"seq\":9,\"cmd\":\"list_objects\"}");
@@ -686,6 +757,7 @@ int main(void)
     test_move_to_and_position();
     test_live_position();
     test_stop_on_full_step();
+    test_soft_limits();
     test_listed();
     printf("test_stepper: ok\n");
     return 0;

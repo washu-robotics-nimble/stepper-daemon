@@ -16,7 +16,13 @@ static char out[LINEBUF_MAX];
 #define REPORT_PERIOD_DEFAULT_MS 250
 static bool settings_applied;
 static uint32_t report_period_ms = REPORT_PERIOD_DEFAULT_MS;
-static uint32_t timeout_ms;   // F-R22, 0 = infinity; used from step 7
+static uint32_t timeout_ms;   // F-R22, 0 = infinity
+
+// Link state (F-R22)
+static uint32_t now_ms;       // from hostlink_tick()
+static bool connected;        // USB up and the port open (DTR)
+static bool lost;             // lost since; link_recovered not yet sent
+static uint32_t last_frame_ms; // last frame that got a reply
 
 void hostlink_init(hostlink_write_fn write)
 {
@@ -31,6 +37,55 @@ bool hostlink_settings_applied(void)
 uint32_t hostlink_report_period_ms(void)
 {
     return report_period_ms;
+}
+
+// ---- Link loss (F-R22) -----
+
+static void lose(void)
+{
+    if (!lost) {
+        lost = true;
+        stepper_link_lost();
+    }
+}
+
+static void recover(void)
+{
+    lost = false;
+    cJSON *evt = cJSON_CreateObject();
+    cJSON_AddStringToObject(evt, "evt", "link_recovered");
+    hostlink_send(evt);
+    cJSON_Delete(evt);
+}
+
+void hostlink_set_connected(bool up)
+{
+    if (up == connected)
+        return;
+    connected = up;
+    if (!up) {
+        lose();
+    } else {
+        last_frame_ms = now_ms;   // the timeout starts over
+        if (lost)
+            recover();
+    }
+}
+
+void hostlink_tick(uint32_t now)
+{
+    now_ms = now;
+    if (connected && !lost && timeout_ms != 0 && now_ms - last_frame_ms >= timeout_ms)
+        lose();
+}
+
+// A frame that gets a reply, even an error reply, keeps the link alive.
+// After a timeout, it is also how the link returns.
+static void frame_received(void)
+{
+    last_frame_ms = now_ms;
+    if (lost && connected)
+        recover();
 }
 
 // Send msg as one line. cJSON needs a few spare bytes, and one more is kept
@@ -289,6 +344,7 @@ void hostlink_handle_line(const char *line, size_t len)
         return;
     }
     double seq_v = seq->valuedouble;
+    frame_received();
 
     const cJSON *name = cJSON_GetObjectItemCaseSensitive(req, "cmd");
     const char *err = "unknown_cmd";

@@ -110,9 +110,11 @@ Object types (from the firmware's board table): `stepper`, `endstop`, `hx711`; l
 
 `not_configured`: motion before `settings_done`.
 
-`set_motion` fields: `microsteps` is 1, 2, 4, 8 or 16; `speed`, `accel` and `pulse_width_us` are integers >= 1; `dir_polarity` is `"H"` (DIR high for positive moves) or `"L"`, as in the daemon's INI. The resulting combination is checked too: settings no move could run with (F-R2, e.g. a `pulse_width_us` too long for `speed` × `microsteps`) are rejected with `bad_param`. If any field is bad, none is applied.
+`set_motion` fields: `microsteps` is 1, 2, 4, 8 or 16; `speed`, `accel` and `pulse_width_us` are integers >= 1; `dir_polarity` is `"H"` (DIR high for positive moves) or `"L"`, as in the daemon's INI. `soft_limit_min` and `soft_limit_max` are int32 positions, or `null` to clear that limit (F-R25); `soft_limit_min` above `soft_limit_max` is rejected. The resulting combination is checked too: settings no move could run with (F-R2, e.g. a `pulse_width_us` too long for `speed` × `microsteps`) are rejected with `bad_param`. If any field is bad, none is applied.
 
 Position and microstepping: positions are whole full steps. With `microsteps` above 1, `stop` (and an endstop, F-R20) ends the move on the next full step, emitting up to `microsteps` − 1 more steps from rest; `stop`'s reply carries that final position, and `move_end` follows once those steps are out. `estop` is the exception: it halts at once (F-R24), even part-way through a full step.
+
+Soft limits (F-R25) apply to a move's target only: a move from outside the limits back inside them is allowed, and a move of 0 steps outside them is rejected. `set_position` may set a position outside them.
 
 `pos_valid` is false from boot, and becomes true on `set_position` (and on homing, F-R20). Disabling a driver makes it false again, since a disabled driver lets the motor turn freely: `set_enable` with `value: 0` for that axis, and `estop` for every axis. Enabling the driver doesn't make it valid. `get_state` during a move reports the steps emitted so far.
 
@@ -121,6 +123,12 @@ Position and microstepping: positions are whole full steps. With `microsteps` ab
 `accel` MUST be at least 1; 0 is rejected with `bad_param`. There is no setting that turns ramping off: a very large `accel` gives, in effect, a constant-speed move.
 
 A `move` with `steps: 0` is valid and sends the same events as any other move: `move_start`, then `move_end` (`reason: done`), both at the current position. It emits no steps.
+
+### Link loss (F-R22)
+
+- A frame that gets a reply, even an error reply, counts as a valid message for the timeout; a frame dropped with `rx_error` does not. The timeout also starts over when the port is opened.
+- On link loss, each moving axis stops as for `stop` (ending on a full step), with `move_end` `reason: link_lost`; ENABLE and the positions stay as they are, so positions stay valid. After a timeout the link still works, so that `move_end` gets through; otherwise it is lost.
+- The link returns when the host opens the port again (DTR) after a disconnect, a suspend or a closed port, and on the next valid message after a timeout. `link_recovered` is then sent once, ahead of any reply.
 
 ### Endstop (`type: endstop`)
 

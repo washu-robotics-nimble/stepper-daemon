@@ -42,6 +42,16 @@ uint32_t hostlink_report_period_ms(void);
 bool hostlink_get_opt_int32(const cJSON *req, const char *key, int32_t min,
                             int32_t max, int32_t *out);
 
+// Link loss (F-R22). up: the USB device is mounted and not suspended, and
+// the host has the port open (DTR). Losing the link stops all motion
+// (stepper_link_lost()); when it returns, a link_recovered event is sent
+// once. Call on every change, or every main loop pass.
+void hostlink_set_connected(bool up);
+
+// The time, for the F-R22 timeout (set_link timeout_ms). Call every main
+// loop pass, before handling lines.
+void hostlink_tick(uint32_t now_ms);
+
 // True if the line is an estop command, which the receive path then handles
 // ahead of the lines already queued (F-R24). Handle it as any other line.
 bool hostlink_is_estop(const char *line, size_t len);

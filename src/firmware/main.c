@@ -55,6 +55,8 @@ static void rx_task(void)
     // the FIFO may already hold the host's first frame.
     if (host_closed) {
         host_closed = false;
+        // A close and reopen between two passes is still a loss (F-R22)
+        hostlink_set_connected(false);
         tud_cdc_read_flush();
         carry_len = carry_pos = 0;
         linequeue_reset(&queue);
@@ -64,6 +66,10 @@ static void rx_task(void)
         host_opened = false;
         linebuf_reset(&rx);
     }
+
+    // Link loss (F-R22): unplugged, suspended, or the port closed. Before
+    // any line is read, so link_recovered comes ahead of every reply.
+    hostlink_set_connected(tud_mounted() && !tud_suspended() && tud_cdc_connected());
 
     // Assemble everything received into lines while the queue has room. An
     // estop runs as soon as its line is complete, ahead of every line still
@@ -119,6 +125,7 @@ int main(void)
 
     while (true) {
         tud_task();
+        hostlink_tick(to_ms_since_boot(get_absolute_time()));
         rx_task();
         stepper_poll(to_ms_since_boot(get_absolute_time()));
     }
