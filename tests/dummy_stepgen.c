@@ -35,16 +35,44 @@ void stepgen_set_dir(size_t axis, bool level)
     dummy_axes[axis].dir = level;
 }
 
-bool stepgen_push(size_t axis, uint32_t word)
+void stepgen_start(size_t axis, const planner_t *plan)
 {
     dummy_axis_t *a = &dummy_axes[axis];
-    assert(a->nwords < DUMMY_MAX_WORDS);
-    a->words[a->nwords++] = word;
+    assert(!a->busy);
+    assert(plan->high == a->high);
+    a->plan = *plan;
+    a->starts++;
     a->busy = true;
-    return true;
 }
 
 bool stepgen_idle(size_t axis)
 {
     return !dummy_axes[axis].busy;
+}
+
+uint32_t stepgen_underruns(size_t axis)
+{
+    return dummy_axes[axis].underruns;
+}
+
+uint64_t dummy_plan_steps(size_t axis)
+{
+    planner_t p = dummy_axes[axis].plan;
+    uint32_t w[64];
+    uint64_t steps = 0;
+    bool repeat = false;
+
+    while (!planner_done(&p)) {
+        size_t n = planner_fill(&p, w, 64);
+        for (size_t i = 0; i < n; i++) {
+            if (repeat)
+                repeat = false;
+            else if (w[i] & 1) {
+                steps += (w[i] >> 1) + 1;
+                repeat = true;
+            } else
+                steps++;
+        }
+    }
+    return steps;
 }

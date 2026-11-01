@@ -13,6 +13,7 @@ const board_stepper_t board_steppers[] = {
         .reset_pin  = 9,
         .defaults   = {
             .speed          = 200,
+            .accel          = 400,
             .pulse_width_us = 20,
         },
     },

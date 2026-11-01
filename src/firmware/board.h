@@ -16,6 +16,7 @@
 // Safe built-in settings, used until the host overrides them (F-R34)
 typedef struct {
     uint32_t speed;           // full steps/s
+    uint32_t accel;           // full steps/s^2
     uint32_t pulse_width_us;  // STEP high time
 } board_motion_t;
 

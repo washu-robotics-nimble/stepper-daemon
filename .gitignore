@@ -8,3 +8,4 @@ motor_demo
 /lg-master/
 /.vscode/
 rsync-remote.sh
+__pycache__/

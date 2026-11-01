@@ -1,4 +1,4 @@
-// Stepper move command and events (F-R1, F-R2, F-R4, F-R32)
+// Stepper move command and events (F-R1, F-R2, F-R3, F-R4, F-R5, F-R32)
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -7,8 +7,9 @@
 #include "hostlink.h"
 #include "stepper.h"
 
-// Board default for m0: 200 full steps/s, 20 us pulses, full step.
-// At 125 MHz: period 625000 cycles, high time 2500 cycles.
+// Board default for m0: 200 full steps/s, 400 full steps/s^2, 20 us
+// pulses, full step. At 125 MHz: cruise period 625000 cycles, high time
+// 2500 cycles.
 #define PERIOD 625000u
 #define HIGH   2500u
 
@@ -75,7 +76,6 @@ static void expect_event(int i, const char *evt, double pos, const char *reason)
 static void finish(double pos)
 {
     dummy_axes[0].busy = false;
-    dummy_axes[0].nwords = 0;
     poll();
     assert(nlines == 1);
     expect_event(0, "move_end", pos, "done");
@@ -86,13 +86,16 @@ static void test_move(void)
     send_line("{\"seq\":1,\"cmd\":\"move\",\"oid\":\"m0\",\"steps\":400}");
     expect_reply(NULL);
 
-    // One repeat pair: 400 steps, each 625000 cycles with 2500 high
+    // A planned move of 400 steps, cruising at 625000 cycles with 2500 high
+    // (the profile itself is tested in test_planner)
     dummy_axis_t *a = &dummy_axes[0];
+    assert(a->starts == 1);
     assert(a->high == HIGH);
     assert(a->dir == true);
-    assert(a->nwords == 2);
-    assert(a->words[0] == stepgen_repeat_word(400));
-    assert(a->words[1] == PERIOD - HIGH - STEPGEN_REPEAT_OVERHEAD);
+    assert(a->plan.pulses == 400);
+    assert(a->plan.cruise == PERIOD);
+    assert(a->plan.high == HIGH);
+    assert(dummy_plan_steps(0) == 400);
 
     // move_start follows the reply, from the next poll; sent once
     poll();
@@ -110,7 +113,8 @@ static void test_move(void)
     send_line("{\"seq\":3,\"cmd\":\"move\",\"oid\":\"m0\",\"steps\":-400}");
     expect_reply(NULL);
     assert(a->dir == false);
-    assert(a->words[0] == stepgen_repeat_word(400));
+    assert(a->starts == 2);
+    assert(a->plan.pulses == 400);
     poll();
     expect_event(0, "move_start", 400, NULL);
     finish(0);
@@ -118,10 +122,11 @@ static void test_move(void)
 
 static void test_zero_move(void)
 {
-    // Same events as any move, both from the next poll; nothing queued
+    // Same events as any move, both from the next poll; nothing started
+    int starts = dummy_axes[0].starts;
     send_line("{\"seq\":4,\"cmd\":\"move\",\"oid\":\"m0\",\"steps\":0}");
     expect_reply(NULL);
-    assert(dummy_axes[0].nwords == 0);
+    assert(dummy_axes[0].starts == starts);
     poll();
     assert(nlines == 2);
     expect_event(0, "move_start", 0, NULL);
@@ -139,18 +144,20 @@ static void test_bad_steps(void)
         "{\"seq\":5,\"cmd\":\"move\",\"oid\":\"m0\",\"steps\":2147483648}",
         "{\"seq\":5,\"cmd\":\"move\",\"oid\":\"m0\",\"steps\":-2147483649}",
     };
+    int starts = dummy_axes[0].starts;
     for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
         send_line(bad[i]);
         expect_reply("bad_param");
-        assert(dummy_axes[0].nwords == 0);
+        assert(dummy_axes[0].starts == starts);
     }
 }
 
 static void test_position_range(void)
 {
-    // Largest moves: the full int32 range, in one repeat word each
+    // Largest moves: the full int32 range
     send_line("{\"seq\":6,\"cmd\":\"move\",\"oid\":\"m0\",\"steps\":2147483647}");
     expect_reply(NULL);
+    assert(dummy_plan_steps(0) == 2147483647u);
     poll();
     finish(2147483647.0);
 
@@ -160,9 +167,41 @@ static void test_position_range(void)
 
     send_line("{\"seq\":8,\"cmd\":\"move\",\"oid\":\"m0\",\"steps\":-2147483648}");
     expect_reply(NULL);
-    assert(dummy_axes[0].words[0] == stepgen_repeat_word(STEPGEN_MAX_REPEAT));
+    assert(dummy_axes[0].plan.pulses == STEPGEN_MAX_REPEAT);
+    assert(dummy_plan_steps(0) == STEPGEN_MAX_REPEAT);
     poll();
     finish(-1);
+}
+
+static void test_underrun(void)
+{
+    send_line("{\"seq\":10,\"cmd\":\"move\",\"oid\":\"m0\",\"steps\":1}");
+    expect_reply(NULL);
+    poll();
+    expect_event(0, "move_start", -1, NULL);
+
+    // A late step is reported once per underrun; the move goes on
+    dummy_axes[0].underruns++;
+    poll();
+    assert(nlines == 1);
+    cJSON *e = line_json(0);
+    assert(strcmp(cJSON_GetObjectItemCaseSensitive(e, "evt")->valuestring, "fault") == 0);
+    assert(strcmp(cJSON_GetObjectItemCaseSensitive(e, "oid")->valuestring, "m0") == 0);
+    assert(strcmp(cJSON_GetObjectItemCaseSensitive(e, "code")->valuestring, "step_underrun") == 0);
+    cJSON_Delete(e);
+    poll();
+    assert(nlines == 0);
+
+    // Two more before the move ends: one fault each poll that sees a change,
+    // then move_end after it
+    dummy_axes[0].underruns += 2;
+    dummy_axes[0].busy = false;
+    poll();
+    assert(nlines == 2);
+    e = line_json(0);
+    assert(strcmp(cJSON_GetObjectItemCaseSensitive(e, "evt")->valuestring, "fault") == 0);
+    cJSON_Delete(e);
+    expect_event(1, "move_end", 0, "done");
 }
 
 static void test_listed(void)
@@ -186,6 +225,7 @@ int main(void)
     test_zero_move();
     test_bad_steps();
     test_position_range();
+    test_underrun();
     test_listed();
     printf("test_stepper: ok\n");
     return 0;

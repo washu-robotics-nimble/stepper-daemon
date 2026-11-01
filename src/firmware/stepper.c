@@ -3,10 +3,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "board.h"
+#include "planner.h"
 #include "stepgen.h"
 
 typedef struct {
     uint32_t speed;           // full steps/s
+    uint32_t accel;           // full steps/s^2
     uint32_t pulse_width_us;  // STEP high time
     uint32_t microsteps;      // MS pins are held at full step until step 6
     bool     dir_forward_high; // DIR level for positive moves
@@ -18,6 +20,7 @@ typedef struct {
     bool     moving;
     bool     start_pending;   // move_start not sent yet
     int32_t  target;          // pos once the move is done
+    uint32_t underruns;       // stepgen_underruns() already reported
 } axis_t;
 
 static axis_t axes[BOARD_MAX_STEPPERS];
@@ -29,6 +32,7 @@ void stepper_init(void)
         axes[i] = (axis_t){
             .motion = {
                 .speed            = d->speed,
+                .accel            = d->accel,
                 .pulse_width_us   = d->pulse_width_us,
                 .microsteps       = 1,
                 .dir_forward_high = true,
@@ -38,6 +42,16 @@ void stepper_init(void)
 }
 
 // ---- Events -----
+
+static void send_fault(size_t i, const char *code)
+{
+    cJSON *msg = cJSON_CreateObject();
+    cJSON_AddStringToObject(msg, "evt", "fault");
+    cJSON_AddStringToObject(msg, "oid", board_steppers[i].oid);
+    cJSON_AddStringToObject(msg, "code", code);
+    hostlink_send(msg);
+    cJSON_Delete(msg);
+}
 
 static void send_move_event(size_t i, const char *evt, const char *reason)
 {
@@ -62,6 +76,13 @@ void stepper_poll(void)
             send_move_event(i, "move_start", NULL);
         }
 
+        // A late step (F-R3): the move goes on, with no step lost
+        uint32_t underruns = stepgen_underruns(i);
+        if (underruns != a->underruns) {
+            a->underruns = underruns;
+            send_fault(i, "step_underrun");
+        }
+
         if (a->moving && stepgen_idle(i)) {
             a->moving = false;
             a->pos = a->target;
@@ -72,8 +93,7 @@ void stepper_poll(void)
 
 // ---- Commands -----
 
-// Start a constant-speed move of steps full steps (build plan step 3; ramps
-// come in step 4)
+// Start a trapezoid move of steps full steps (F-R5)
 static const char *start_move(size_t i, int32_t steps)
 {
     axis_t *a = &axes[i];
@@ -99,23 +119,29 @@ static const char *start_move(size_t i, int32_t steps)
         return "bad_param";
 
     // Timing in state machine cycles. F-R2: high time >= pulse_width_us,
-    // low time >= 1 us.
+    // low time >= 1 us. Ramp steps are never faster than the cruise, so
+    // checking the cruise period covers them.
     uint64_t clk = stepgen_clock_hz();
     uint64_t rate = (uint64_t)m->speed * m->microsteps;   // pulses/s
-    if (rate == 0)
+    uint64_t accel = (uint64_t)m->accel * m->microsteps;  // pulses/s^2
+    if (rate == 0 || accel == 0 || accel > UINT32_MAX)
         return "bad_param";
     uint64_t period = (clk + rate / 2) / rate;
     uint64_t high = m->pulse_width_us * clk / 1000000;
-    uint64_t low_min = clk / 1000000;
-    if (high < low_min || period < high + low_min || period > UINT32_MAX)
+    uint64_t one_us = clk / 1000000;
+    if (high < one_us || period < high + one_us)
         return "bad_param";
+    // What one single word can encode, and the planner's period limit
+    if (period < high + STEPGEN_SINGLE_OVERHEAD || period >= (1u << 30))
+        return "bad_param";
+
+    planner_t plan;
+    planner_init(&plan, (uint32_t)pulses, (uint32_t)period, (uint32_t)high,
+                 (uint32_t)accel, (uint32_t)clk);
 
     stepgen_set_high(i, (uint32_t)high);
     stepgen_set_dir(i, (steps > 0) == m->dir_forward_high);
-
-    // The FIFO is empty while idle, so both words of the pair fit
-    stepgen_push(i, stepgen_repeat_word((uint32_t)pulses));
-    stepgen_push(i, (uint32_t)(period - high - STEPGEN_REPEAT_OVERHEAD));
+    stepgen_start(i, &plan);
 
     a->target = (int32_t)target;
     a->moving = true;

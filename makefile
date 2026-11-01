@@ -13,7 +13,7 @@ TEST_SRC = $(wildcard tests/test_*.c)
 TEST_BIN = $(TEST_SRC:tests/%.c=build/tests/%)
 TEST_LIB = lib/cJSON/cJSON.c \
            src/firmware/linebuf.c src/firmware/hostlink.c src/firmware/board_table.c \
-           src/firmware/stepper.c tests/dummy_stepgen.c
+           src/firmware/stepper.c src/firmware/planner.c tests/dummy_stepgen.c
 
 all: $(TARGET)
 

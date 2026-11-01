@@ -19,6 +19,7 @@ add_executable(stepper_fw
     board_table.c
     hostlink.c
     linebuf.c
+    planner.c
     stepgen.c
     stepper.c
     usb_descriptors.c
@@ -42,6 +43,9 @@ target_link_libraries(stepper_fw
     hardware_gpio
     hardware_pio
     hardware_clocks
+    hardware_dma
+    hardware_irq
+    pico_multicore
     tinyusb_device
     tinyusb_board
 )

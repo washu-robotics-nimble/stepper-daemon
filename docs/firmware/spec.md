@@ -110,6 +110,8 @@ Object types (from the firmware's board table): `stepper`, `endstop`, `hx711`; l
 
 `not_configured`: motion before `settings_done`.
 
+`accel` MUST be at least 1; 0 is rejected with `bad_param`. There is no setting that turns ramping off: a very large `accel` gives, in effect, a constant-speed move.
+
 A `move` with `steps: 0` is valid and sends the same events as any other move: `move_start`, then `move_end` (`reason: done`), both at the current position. It emits no steps.
 
 ### Endstop (`type: endstop`)
@@ -135,7 +137,7 @@ A `move` with `steps: 0` is valid and sends the same events as any other move: `
 | `move_end` | `oid`, `pos`, `reason` (`done` / `stop` / `endstop` / `estop` / `link_lost`) |
 | `position` | `oid`, `pos` (at `report_hz` while moving) |
 | `endstop` | `oid`, `state` |
-| `fault` | `oid` (optional), `code` (e.g. `home_timeout`) |
+| `fault` | `oid` (optional), `code` (e.g. `home_timeout`; `step_underrun`: a step came out late, F-R3, and the move goes on) |
 | `link_recovered` | - Sent once when the link returns after a loss; motion was stopped (F-R22) |
 | `rx_error` | `err` (`too_long` / `bad_json` / `no_seq`). Sent for a dropped frame, since its `seq` is unknown; the host's pending request then times out (D-R30). `no_seq`: valid JSON, but `seq` is missing or not an integer in uint32 range |
 

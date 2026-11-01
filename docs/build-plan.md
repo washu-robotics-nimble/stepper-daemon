@@ -64,10 +64,10 @@ Questions are at the end; answer them as before.
 
 - New per-step planner using Austin's integer recurrence, on core 1 (F-R5). Keeps only the trapezoid / triangle decision from `src/ramp.c`.
 - DMA chunk feeding: core 1 fills two alternating buffers of about 64 periods, and DMA streams them into the PIO FIFO.
-- TX-stall check after each segment; a stall is reported as a `fault` event with `step_underrun` (F-R3).
+- TX-stall check each time DMA resumes; a stall is reported as a `fault` event with `step_underrun` (F-R3).
 - The planner is pure C and also compiles on the host.
 
-**Test:** host unit tests: step total is exact, every period is within 1% of the exact `sqrt(2n / a)` profile, acceleration never exceeds `accel`, and short moves give a triangular profile. On the analyzer: the period shrinks step by step, holds, then grows, with no flat segments during ramps. Measure jitter while a host script floods `ping` (F-R3, ≤ 1 µs), and check that no `step_underrun` fault appears.
+**Test:** host unit tests: step total is exact, every period from the third on is within 1% of the exact `sqrt(2n / a)` profile (the 0.676 correction makes the first two shorter), step-to-step acceleration never exceeds `accel` (allowing for 1-cycle rounding), and short moves give a triangular profile. On the analyzer: the period shrinks step by step, holds, then grows, with no flat segments during ramps. Measure jitter while a host script floods `ping` (F-R3, ≤ 1 µs), and check that no `step_underrun` fault appears.
 
 ### 5. Stop, estop, enable
 
