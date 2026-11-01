@@ -43,7 +43,7 @@ Questions are at the end; answer them as before.
 - At boot: STEP low, ENABLE high, before anything else runs (F-R23).
 - TinyUSB CDC echoes lines back.
 
-**Test:** with the analyzer on ENABLE, reset the Pico: ENABLE goes high, STEP never pulses. `screen /dev/ttyACM0` echoes typed lines.
+**Test:** with the analyzer on ENABLE, reset the Pico: ENABLE goes high, STEP never pulses. A serial terminal on the board's CDC device echoes typed lines.
 
 ### 2. Framing and global commands
 

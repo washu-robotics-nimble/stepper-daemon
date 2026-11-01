@@ -4,11 +4,19 @@ How the firmware meets [spec.md](spec.md). Update this file in the same commit a
 
 ## Current state (2026-10-31)
 
-Build plan step 0: an empty skeleton in `src/firmware/` (`main` loops forever). No functionality yet.
+Build plan step 1: safe boot state and a temporary USB echo.
 
-- Pico SDK **2.3.1**, board `pico` (RP2040), toolchain `arm-none-eabi-gcc` from Debian. The SDK lives outside the repo (e.g. `~/pico/pico-sdk`, cloned with submodules for TinyUSB).
-- Build: `cmake -S src/firmware -B src/firmware/build -DPICO_SDK_PATH=~/pico/pico-sdk`, then `cmake --build src/firmware/build`. Output: `src/firmware/build/stepper_fw.uf2`.
-- Without a system `picotool`, the SDK downloads and builds one inside the build directory (needed to produce the `.uf2`). Add `-DPICOTOOL_FETCH_FROM_GIT_PATH=~/pico/picotool` to share one copy across clean builds.
+| File | Role |
+|---|---|
+| `board.c` / `board.h` | Board table (dev board: one stepper `m0`, pins as in `docs/build-plan.md`) and `board_safe_init()` |
+| `main.c` | Calls `board_safe_init()` first (F-R23), then runs TinyUSB and echoes received bytes back (temporary, replaced by the host link in step 2) |
+| `usb_descriptors.c`, `tusb_config.h` | TinyUSB used directly (not the SDK's `stdio_usb`), one CDC interface (F-R30). Development VID/PID `2E8A:000A`. The USB serial number is the flash unique ID, so `/dev/serial/by-id/` gives each board a stable path |
+
+Safe state at boot: STEP low and ENABLE high (F-R23). F-R23 doesn't specify the other driver pins; they are driven low, which holds the A4988 asleep (SLEEP) and in reset (RESET), with DIR low and full-step microstepping (MS1–MS3 low).
+
+- Pico SDK **2.3.1**, board `pico` (RP2040), toolchain `arm-none-eabi-gcc` from Debian. The SDK lives outside the repo, checked out with its submodules (TinyUSB is one).
+- Build: `cmake -S src/firmware -B src/firmware/build -DPICO_SDK_PATH=<pico-sdk> -DPICOTOOL_FETCH_FROM_GIT_PATH=<picotool-dir>`, then `cmake --build src/firmware/build`. Output: `src/firmware/build/stepper_fw.uf2`. `<pico-sdk>` is the SDK checkout (alternatively, set the `PICO_SDK_PATH` environment variable); `<picotool-dir>` is any directory outside the build tree. Both are cached in the build directory, so they're only needed on the first configure.
+- Without a system `picotool`, the SDK downloads and builds one (needed to produce the `.uf2`); `PICOTOOL_FETCH_FROM_GIT_PATH` keeps that one copy outside the build directory, so clean builds reuse it.
 
 ## Intended approach (not yet committed)
 
