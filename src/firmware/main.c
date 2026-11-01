@@ -120,6 +120,6 @@ int main(void)
     while (true) {
         tud_task();
         rx_task();
-        stepper_poll();
+        stepper_poll(to_ms_since_boot(get_absolute_time()));
     }
 }

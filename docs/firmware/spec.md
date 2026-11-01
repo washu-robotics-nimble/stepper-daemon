@@ -71,7 +71,7 @@ Same as the daemon: positions in full steps (signed 32-bit), speeds in full step
   {"seq":13,"ack":false,"err":"busy"}
   {"evt":"move_end","oid":"m0","pos":400,"reason":"done"}
   ```
-- `F-R32` The firmware MUST send a state report when a move starts, finishes or is stopped, when a switch changes, and on fault. It SHOULD also send periodic position updates during a move, at a configurable rate. Default: 4 Hz. Reports carry no MCU timestamp; the host timestamps them on receipt. (`F-G4`)
+- `F-R32` The firmware MUST send a state report when a move starts, finishes or is stopped, when a switch changes, and on fault. It SHOULD also send periodic position updates during a move, at a configurable period (`report_period`, in ms; 0 turns them off). Default: 250 ms. Reports carry no MCU timestamp; the host timestamps them on receipt. (`F-G4`)
 - `F-R33` The first exchange MUST report the firmware and protocol versions, and a `settings_applied` flag. The flag is false after boot, and becomes true once the host signals that it has sent all settings; state reports also carry it. The daemon refuses a protocol it doesn't support.
 - `F-R34` All behavioural settings MUST be settable over the link, per object (`F-G6`). The hardware layout (which objects exist, their pins and driver wiring) is fixed at build time and MUST NOT be settable over the link. Every object MUST have safe built-in default settings, which apply until (and unless) the host overrides them. Homing direction, homing speed and maximum homing travel are fixed in the firmware too, so a host can never send a motor into its hard end on the side without an endstop.
 - `F-R35` On request, the firmware MUST report every object it has, each with its object ID (`oid`), its type, and the commands it supports. The firmware assigns the `oid`s. (`F-G6`)
@@ -91,7 +91,7 @@ Object types (from the firmware's board table): `stepper`, `endstop`, `hx711`; l
 | `identify` | - | `fw`, `proto`, `settings_applied` | F-R33; always the first exchange |
 | `list_objects` | - | `objects` (list of `{oid, type}`), `types` (map: type → list of commands) | F-R35 |
 | `settings_done` | - | - | Sets `settings_applied` (F-R33, D-R3) |
-| `set_link` | `report_hz`, `timeout_ms` | - | F-R32 rate (default 4), F-R22 timeout (0 = infinity) |
+| `set_link` | any of `report_period`, `timeout_ms` | - | F-R32 period in ms (default 250, 0 = off), F-R22 timeout (0 = infinity). Both are integers >= 0; if either is bad, neither is applied (`bad_param`) |
 | `ping` | - | - | Keeps the F-R22 timeout alive |
 | `estop` | - | - | F-R24; handled before the queue |
 
@@ -109,6 +109,12 @@ Object types (from the firmware's board table): `stepper`, `endstop`, `hx711`; l
 | `get_state` | `oid` | `pos`, `pos_valid`, `moving`, `enabled`, `settings_applied` | - |
 
 `not_configured`: motion before `settings_done`.
+
+`set_motion` fields: `microsteps` is 1, 2, 4, 8 or 16; `speed`, `accel` and `pulse_width_us` are integers >= 1; `dir_polarity` is `"H"` (DIR high for positive moves) or `"L"`, as in the daemon's INI. The resulting combination is checked too: settings no move could run with (F-R2, e.g. a `pulse_width_us` too long for `speed` × `microsteps`) are rejected with `bad_param`. If any field is bad, none is applied.
+
+Position and microstepping: positions are whole full steps. With `microsteps` above 1, `stop` (and an endstop, F-R20) ends the move on the next full step, emitting up to `microsteps` − 1 more steps from rest; `stop`'s reply carries that final position, and `move_end` follows once those steps are out. `estop` is the exception: it halts at once (F-R24), even part-way through a full step.
+
+`pos_valid` is false from boot, and becomes true on `set_position` (and on homing, F-R20). Disabling a driver makes it false again, since a disabled driver lets the motor turn freely: `set_enable` with `value: 0` for that axis, and `estop` for every axis. Enabling the driver doesn't make it valid. `get_state` during a move reports the steps emitted so far.
 
 `set_enable` with `value: 1` also wakes the driver if it is asleep or in reset: SLEEP and RESET are driven high, and ENABLE goes low after the A4988's 1 ms wake-up time. `value: 0` (and `estop`) only disables the driver; SLEEP and RESET stay high. These are the only commands that drive SLEEP and RESET (F-R10).
 
@@ -135,9 +141,9 @@ A `move` with `steps: 0` is valid and sends the same events as any other move: `
 
 | `evt` | Fields |
 |---|---|
-| `move_start` | `oid`, `pos` |
-| `move_end` | `oid`, `pos`, `reason` (`done` / `stop` / `endstop` / `estop` / `link_lost`) |
-| `position` | `oid`, `pos` (at `report_hz` while moving) |
+| `move_start` | `oid`, `pos`, `settings_applied` |
+| `move_end` | `oid`, `pos`, `reason` (`done` / `stop` / `endstop` / `estop` / `link_lost`), `settings_applied` |
+| `position` | `oid`, `pos`, `settings_applied` (every `report_period` while moving) |
 | `endstop` | `oid`, `state` |
 | `fault` | `oid` (optional), `code` (e.g. `home_timeout`; `step_underrun`: a step came out late, F-R3, and the move goes on) |
 | `link_recovered` | - Sent once when the link returns after a loss; motion was stopped (F-R22) |

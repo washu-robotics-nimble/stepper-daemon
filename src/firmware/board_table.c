@@ -15,6 +15,8 @@ const board_stepper_t board_steppers[] = {
             .speed          = 200,
             .accel          = 400,
             .pulse_width_us = 20,
+            .microsteps     = 1,
+            .dir_forward_high = true,
         },
     },
 };

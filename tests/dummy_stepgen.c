@@ -43,6 +43,7 @@ void stepgen_start(size_t axis, const planner_t *plan)
     a->plan = *plan;
     a->starts++;
     a->busy = true;
+    a->emitted = 0;
 }
 
 bool stepgen_idle(size_t axis)
@@ -58,6 +59,11 @@ uint32_t stepgen_stop(size_t axis)
         a->stops++;
     }
     return a->emitted;
+}
+
+uint32_t stepgen_emitted(size_t axis)
+{
+    return dummy_axes[axis].emitted;
 }
 
 uint32_t stepgen_underruns(size_t axis)

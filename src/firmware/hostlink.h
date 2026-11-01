@@ -31,6 +31,17 @@ void hostlink_init(hostlink_write_fn write);
 // received, so an embedded NUL can be detected.
 void hostlink_handle_line(const char *line, size_t len);
 
+// F-R33: true once the host has sent settings_done; false from boot
+bool hostlink_settings_applied(void);
+
+// F-R32: period of position events while moving, ms; 0 turns them off
+uint32_t hostlink_report_period_ms(void);
+
+// Read an optional integer field: true if absent, or present and in
+// [min, max] (stored in *out); false if present but not such an integer
+bool hostlink_get_opt_int32(const cJSON *req, const char *key, int32_t min,
+                            int32_t max, int32_t *out);
+
 // True if the line is an estop command, which the receive path then handles
 // ahead of the lines already queued (F-R24). Handle it as any other line.
 bool hostlink_is_estop(const char *line, size_t len);

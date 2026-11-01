@@ -7,4 +7,7 @@
 // Driver ENABLE as last set by board_set_enable() (true: enabled)
 extern bool dummy_enabled[BOARD_MAX_STEPPERS];
 
+// Microsteps as last set by board_set_microsteps()
+extern uint32_t dummy_microsteps[BOARD_MAX_STEPPERS];
+
 #endif

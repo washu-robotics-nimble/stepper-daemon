@@ -62,6 +62,10 @@ bool stepgen_idle(size_t axis);
 // returns the last move's count.
 uint32_t stepgen_stop(size_t axis);
 
+// Steps the current (or last) move has emitted so far, counted on the STEP
+// pin (F-R1)
+uint32_t stepgen_emitted(size_t axis);
+
 // Number of times the state machine has run out of words in the middle of a
 // move (F-R3): each is a late step. Counts up from 0 at boot and never
 // resets; the caller keeps the last value it has seen.

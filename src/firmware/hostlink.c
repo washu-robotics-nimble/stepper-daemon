@@ -12,9 +12,25 @@
 static hostlink_write_fn write_line;
 static char out[LINEBUF_MAX];
 
+// Link settings (set_link) and the F-R33 flag
+#define REPORT_PERIOD_DEFAULT_MS 250
+static bool settings_applied;
+static uint32_t report_period_ms = REPORT_PERIOD_DEFAULT_MS;
+static uint32_t timeout_ms;   // F-R22, 0 = infinity; used from step 7
+
 void hostlink_init(hostlink_write_fn write)
 {
     write_line = write;
+}
+
+bool hostlink_settings_applied(void)
+{
+    return settings_applied;
+}
+
+uint32_t hostlink_report_period_ms(void)
+{
+    return report_period_ms;
 }
 
 // Send msg as one line. cJSON needs a few spare bytes, and one more is kept
@@ -57,8 +73,32 @@ static const char *cmd_identify(const cJSON *req, cJSON *reply, size_t index)
     (void)index;
     cJSON_AddStringToObject(reply, "fw", FW_VERSION);
     cJSON_AddNumberToObject(reply, "proto", HOSTLINK_PROTO);
-    // No settings exist yet (build plan step 6)
-    cJSON_AddBoolToObject(reply, "settings_applied", false);
+    cJSON_AddBoolToObject(reply, "settings_applied", settings_applied);
+    return NULL;
+}
+
+static const char *cmd_settings_done(const cJSON *req, cJSON *reply, size_t index)
+{
+    (void)req;
+    (void)reply;
+    (void)index;
+    settings_applied = true;
+    return NULL;
+}
+
+static const char *cmd_set_link(const cJSON *req, cJSON *reply, size_t index)
+{
+    (void)reply;
+    (void)index;
+    int32_t period = (int32_t)report_period_ms;
+    int32_t timeout = (int32_t)timeout_ms;
+
+    // All or nothing
+    if (!hostlink_get_opt_int32(req, "report_period", 0, INT32_MAX, &period)
+        || !hostlink_get_opt_int32(req, "timeout_ms", 0, INT32_MAX, &timeout))
+        return "bad_param";
+    report_period_ms = (uint32_t)period;
+    timeout_ms = (uint32_t)timeout;
     return NULL;
 }
 
@@ -83,10 +123,12 @@ static const char *cmd_estop(const cJSON *req, cJSON *reply, size_t index)
 }
 
 static const hostlink_cmd_t global_cmds[] = {
-    {"identify",     cmd_identify},
-    {"list_objects", cmd_list_objects},
-    {"ping",         cmd_ping},
-    {"estop",        cmd_estop},
+    {"identify",      cmd_identify},
+    {"list_objects",  cmd_list_objects},
+    {"settings_done", cmd_settings_done},
+    {"set_link",      cmd_set_link},
+    {"ping",          cmd_ping},
+    {"estop",         cmd_estop},
     {NULL, NULL},
 };
 
@@ -165,6 +207,19 @@ bool hostlink_get_int32(const cJSON *req, const char *key, int32_t *out)
     if (v < INT32_MIN || v > INT32_MAX || v != floor(v))
         return false;
     *out = (int32_t)v;
+    return true;
+}
+
+bool hostlink_get_opt_int32(const cJSON *req, const char *key, int32_t min,
+                            int32_t max, int32_t *out)
+{
+    int32_t v;
+
+    if (cJSON_GetObjectItemCaseSensitive(req, key) == NULL)
+        return true;
+    if (!hostlink_get_int32(req, key, &v) || v < min || v > max)
+        return false;
+    *out = v;
     return true;
 }
 

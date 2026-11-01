@@ -314,6 +314,11 @@ uint32_t stepgen_underruns(size_t axis)
     return feeds[axis].underruns;
 }
 
+uint32_t stepgen_emitted(size_t axis)
+{
+    return count_now(axis) - feeds[axis].start_count;
+}
+
 uint32_t stepgen_stop(size_t axis)
 {
     uint sm = (uint)axis;
@@ -321,7 +326,7 @@ uint32_t stepgen_stop(size_t axis)
     feed_t *f = &feeds[axis];
 
     if (stepgen_idle(axis))
-        return count_now(axis) - f->start_count;
+        return stepgen_emitted(axis);
 
     // Halted between two instructions: no step starts after this
     pio_sm_set_enabled(pio, sm, false);
@@ -348,5 +353,5 @@ uint32_t stepgen_stop(size_t axis)
     stepgen_set_high(axis, f->high);
     pio_sm_set_enabled(pio, sm, true);
 
-    return count_now(axis) - f->start_count;
+    return stepgen_emitted(axis);
 }

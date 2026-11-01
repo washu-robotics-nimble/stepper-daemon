@@ -41,3 +41,24 @@ void board_set_enable(size_t i, bool on)
     }
     gpio_put(s->enable_pin, !on);   // active low
 }
+
+void board_set_microsteps(size_t i, uint32_t microsteps)
+{
+    // A4988 MS1, MS2, MS3 (datasheet table 1)
+    static const struct { uint32_t microsteps; bool ms[3]; } modes[] = {
+        {1,  {0, 0, 0}},
+        {2,  {1, 0, 0}},
+        {4,  {0, 1, 0}},
+        {8,  {1, 1, 0}},
+        {16, {1, 1, 1}},
+    };
+    const board_stepper_t *s = &board_steppers[i];
+
+    for (size_t m = 0; m < sizeof modes / sizeof modes[0]; m++) {
+        if (modes[m].microsteps == microsteps) {
+            for (int k = 0; k < 3; k++)
+                gpio_put(s->ms_pin[k], modes[m].ms[k]);
+            return;
+        }
+    }
+}

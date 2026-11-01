@@ -20,6 +20,8 @@ typedef struct {
     uint32_t speed;           // full steps/s
     uint32_t accel;           // full steps/s^2
     uint32_t pulse_width_us;  // STEP high time
+    uint32_t microsteps;      // 1, 2, 4, 8 or 16
+    bool     dir_forward_high; // dir_polarity "H": DIR high for positive moves
 } board_motion_t;
 
 typedef struct {
@@ -44,5 +46,9 @@ void board_safe_init(void);
 // A4988's 1 ms wake-up time, then ENABLE low. Disabling only drives ENABLE
 // high; SLEEP and RESET stay high.
 void board_set_enable(size_t i, bool on);
+
+// MS1..MS3 of stepper i for 1, 2, 4, 8 or 16 microsteps (F-R10). Only while
+// the axis is idle.
+void board_set_microsteps(size_t i, uint32_t microsteps);
 
 #endif

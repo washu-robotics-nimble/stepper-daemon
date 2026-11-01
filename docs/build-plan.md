@@ -81,10 +81,10 @@ Questions are at the end; answer them as before.
 
 - `set_motion`, `settings_done`, `get_state`, `set_position`, `move_to`; `not_configured` before `settings_done`; `settings_applied` in `identify` and in state reports (F-R33, F-R34).
 - Built-in safe defaults per object.
-- Periodic `position` events at `report_hz`; `set_link`.
+- Periodic `position` events every `report_period` ms (default 250, 0 = off); `set_link`.
 - Microstep changes rejected while moving (F-R10).
 
-**Test:** a Python script runs the full handshake, then checks every command's reply and error case. On the analyzer, the MS1–MS3 levels follow `microsteps`.
+**Test:** a Python script (`tests/check_commands.py`) runs the full handshake, then checks every command's reply and error case. On the analyzer, the MS1–MS3 levels follow `microsteps`.
 
 ### 7. Link loss and soft limits
 

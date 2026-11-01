@@ -42,8 +42,9 @@ def open_port(path):
 
 
 class Link:
-    def __init__(self, fd):
+    def __init__(self, fd, echo=True):
         self.fd = fd
+        self.echo = echo   # print every line sent and received
         self.seq = 0
         self.rx = b""
         self.moving = set()  # oids between move_start and move_end
@@ -58,7 +59,8 @@ class Link:
             self.seq += 1
             obj = {"seq": self.seq, **obj}
             frame = json.dumps(obj, separators=(",", ":"))
-        print(f"> {frame}", flush=True)
+        if self.echo:
+            print(f"> {frame}", flush=True)
         os.write(self.fd, frame.encode() + b"\n")
         return obj.get("seq") if isinstance(obj, dict) else None
 
@@ -73,7 +75,8 @@ class Link:
         *lines, self.rx = self.rx.split(b"\n")
         msgs = []
         for line in lines:
-            print(f"< {line.decode(errors='replace')}", flush=True)
+            if self.echo:
+                print(f"< {line.decode(errors='replace')}", flush=True)
             try:
                 msg = json.loads(line)
             except ValueError:
