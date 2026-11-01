@@ -4,6 +4,8 @@
 #include "board.h"
 #include "hostlink.h"
 #include "linebuf.h"
+#include "stepgen.h"
+#include "stepper.h"
 
 static linebuf_t rx;
 
@@ -78,6 +80,9 @@ int main(void)
     // Safe driver outputs before anything else runs (F-R23)
     board_safe_init();
 
+    stepgen_init();
+    stepper_init();
+
     linebuf_reset(&rx);
     hostlink_init(usb_write);
     tusb_init();
@@ -85,5 +90,6 @@ int main(void)
     while (true) {
         tud_task();
         rx_task();
+        stepper_poll();
     }
 }

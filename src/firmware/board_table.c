@@ -11,6 +11,13 @@ const board_stepper_t board_steppers[] = {
         .ms_pin     = {5, 6, 7},
         .sleep_pin  = 8,
         .reset_pin  = 9,
+        .defaults   = {
+            .speed          = 200,
+            .pulse_width_us = 20,
+        },
     },
 };
 const size_t board_stepper_count = sizeof board_steppers / sizeof board_steppers[0];
+
+_Static_assert(sizeof board_steppers / sizeof board_steppers[0] <= BOARD_MAX_STEPPERS,
+               "more steppers than PIO state machines");

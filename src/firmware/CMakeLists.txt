@@ -19,6 +19,8 @@ add_executable(stepper_fw
     board_table.c
     hostlink.c
     linebuf.c
+    stepgen.c
+    stepper.c
     usb_descriptors.c
     ${LIB_DIR}/cJSON/cJSON.c
 )
@@ -31,10 +33,15 @@ target_include_directories(stepper_fw PRIVATE
     ${LIB_DIR}/cJSON
 )
 
+# Generates stepgen.pio.h in the build directory
+pico_generate_pio_header(stepper_fw ${CMAKE_CURRENT_LIST_DIR}/stepgen.pio)
+
 target_link_libraries(stepper_fw
     pico_stdlib
     pico_unique_id
     hardware_gpio
+    hardware_pio
+    hardware_clocks
     tinyusb_device
     tinyusb_board
 )

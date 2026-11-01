@@ -6,16 +6,8 @@
 #include "cJSON.h"
 #include "board.h"
 #include "linebuf.h"
+#include "stepper.h"
 #include "version.h"
-
-// A command handler adds its result fields to reply, and returns NULL on
-// success or an error code (message catalogue) on failure.
-typedef const char *(*cmd_fn)(const cJSON *req, cJSON *reply);
-
-typedef struct {
-    const char *name;
-    cmd_fn fn;
-} cmd_entry_t;
 
 static hostlink_write_fn write_line;
 static char out[LINEBUF_MAX];
@@ -29,7 +21,7 @@ void hostlink_init(hostlink_write_fn write)
 // for the '\n', so a frame never exceeds LINEBUF_MAX. A message too long to
 // fit is not sent; the host then times out (D-R30). Only a firmware bug
 // can cause that.
-static void send(const cJSON *msg)
+void hostlink_send(const cJSON *msg)
 {
     if (!cJSON_PrintPreallocated((cJSON *)msg, out, sizeof out - 1, false))
         return;
@@ -44,7 +36,7 @@ static void send_error_reply(double seq, const char *err)
     cJSON_AddNumberToObject(reply, "seq", seq);
     cJSON_AddBoolToObject(reply, "ack", false);
     cJSON_AddStringToObject(reply, "err", err);
-    send(reply);
+    hostlink_send(reply);
     cJSON_Delete(reply);
 }
 
@@ -53,15 +45,16 @@ void hostlink_rx_error(const char *err)
     cJSON *evt = cJSON_CreateObject();
     cJSON_AddStringToObject(evt, "evt", "rx_error");
     cJSON_AddStringToObject(evt, "err", err);
-    send(evt);
+    hostlink_send(evt);
     cJSON_Delete(evt);
 }
 
 // ---- Global commands ----
 
-static const char *cmd_identify(const cJSON *req, cJSON *reply)
+static const char *cmd_identify(const cJSON *req, cJSON *reply, size_t index)
 {
     (void)req;
+    (void)index;
     cJSON_AddStringToObject(reply, "fw", FW_VERSION);
     cJSON_AddNumberToObject(reply, "proto", HOSTLINK_PROTO);
     // No settings exist yet (build plan step 6)
@@ -69,16 +62,17 @@ static const char *cmd_identify(const cJSON *req, cJSON *reply)
     return NULL;
 }
 
-static const char *cmd_list_objects(const cJSON *req, cJSON *reply);
+static const char *cmd_list_objects(const cJSON *req, cJSON *reply, size_t index);
 
-static const char *cmd_ping(const cJSON *req, cJSON *reply)
+static const char *cmd_ping(const cJSON *req, cJSON *reply, size_t index)
 {
     (void)req;
     (void)reply;
+    (void)index;
     return NULL;
 }
 
-static const cmd_entry_t global_cmds[] = {
+static const hostlink_cmd_t global_cmds[] = {
     {"identify",     cmd_identify},
     {"list_objects", cmd_list_objects},
     {"ping",         cmd_ping},
@@ -87,21 +81,16 @@ static const cmd_entry_t global_cmds[] = {
 
 // ---- Object commands -----
 
-// None implemented yet (build plan steps 3 onwards)
-static const cmd_entry_t stepper_cmds[] = {
-    {NULL, NULL},
-};
-
 typedef struct {
     const char *type;
-    const cmd_entry_t *cmds;
+    const hostlink_cmd_t *cmds;
 } type_entry_t;
 
 static const type_entry_t types[] = {
     {"stepper", stepper_cmds},
 };
 
-static const cmd_entry_t *find_cmd(const cmd_entry_t *table, const char *name)
+static const hostlink_cmd_t *find_cmd(const hostlink_cmd_t *table, const char *name)
 {
     for (; table->name != NULL; table++)
         if (strcmp(table->name, name) == 0)
@@ -109,18 +98,23 @@ static const cmd_entry_t *find_cmd(const cmd_entry_t *table, const char *name)
     return NULL;
 }
 
-// Look up an object by oid; returns its type entry, or NULL if unknown
-static const type_entry_t *find_object(const char *oid)
+// Look up an object by oid; returns its type entry and sets *index to its
+// position in its board table, or returns NULL if unknown
+static const type_entry_t *find_object(const char *oid, size_t *index)
 {
-    for (size_t i = 0; i < board_stepper_count; i++)
-        if (strcmp(board_steppers[i].oid, oid) == 0)
+    for (size_t i = 0; i < board_stepper_count; i++) {
+        if (strcmp(board_steppers[i].oid, oid) == 0) {
+            *index = i;
             return &types[0];
+        }
+    }
     return NULL;
 }
 
-static const char *cmd_list_objects(const cJSON *req, cJSON *reply)
+static const char *cmd_list_objects(const cJSON *req, cJSON *reply, size_t index)
 {
     (void)req;
+    (void)index;
 
     cJSON *objects = cJSON_AddArrayToObject(reply, "objects");
     for (size_t i = 0; i < board_stepper_count; i++) {
@@ -133,7 +127,7 @@ static const char *cmd_list_objects(const cJSON *req, cJSON *reply)
     cJSON *type_map = cJSON_AddObjectToObject(reply, "types");
     for (size_t t = 0; t < sizeof types / sizeof types[0]; t++) {
         cJSON *names = cJSON_AddArrayToObject(type_map, types[t].type);
-        for (const cmd_entry_t *c = types[t].cmds; c->name != NULL; c++)
+        for (const hostlink_cmd_t *c = types[t].cmds; c->name != NULL; c++)
             cJSON_AddItemToArray(names, cJSON_CreateString(c->name));
     }
     return NULL;
@@ -151,9 +145,22 @@ static bool valid_seq(const cJSON *seq)
     return v >= 0 && v <= 4294967295.0 && v == floor(v);
 }
 
-static const cmd_entry_t *resolve(const cJSON *req, const char *name, const char **err)
+bool hostlink_get_int32(const cJSON *req, const char *key, int32_t *out)
 {
-    const cmd_entry_t *cmd = find_cmd(global_cmds, name);
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(req, key);
+    if (!cJSON_IsNumber(item))
+        return false;
+    double v = item->valuedouble;
+    if (v < INT32_MIN || v > INT32_MAX || v != floor(v))
+        return false;
+    *out = (int32_t)v;
+    return true;
+}
+
+static const hostlink_cmd_t *resolve(const cJSON *req, const char *name,
+                                     size_t *index, const char **err)
+{
+    const hostlink_cmd_t *cmd = find_cmd(global_cmds, name);
     if (cmd != NULL)
         return cmd;
 
@@ -167,7 +174,7 @@ static const cmd_entry_t *resolve(const cJSON *req, const char *name, const char
         return NULL;
     }
 
-    const type_entry_t *type = find_object(oid->valuestring);
+    const type_entry_t *type = find_object(oid->valuestring, index);
     if (type == NULL) {
         *err = "unknown_oid";
         return NULL;
@@ -206,17 +213,18 @@ void hostlink_handle_line(const char *line, size_t len)
 
     const cJSON *name = cJSON_GetObjectItemCaseSensitive(req, "cmd");
     const char *err = "unknown_cmd";
-    const cmd_entry_t *cmd = NULL;
+    const hostlink_cmd_t *cmd = NULL;
+    size_t index = 0;
     if (cJSON_IsString(name))
-        cmd = resolve(req, name->valuestring, &err);
+        cmd = resolve(req, name->valuestring, &index, &err);
 
     if (cmd != NULL) {
         cJSON *reply = cJSON_CreateObject();
         cJSON_AddNumberToObject(reply, "seq", seq_v);
         cJSON_AddBoolToObject(reply, "ack", true);
-        err = cmd->fn(req, reply);
+        err = cmd->fn(req, reply, index);
         if (err == NULL)
-            send(reply);
+            hostlink_send(reply);
         cJSON_Delete(reply);
     }
 

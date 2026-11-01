@@ -4,23 +4,34 @@ How the firmware meets [spec.md](spec.md). Update this file in the same commit a
 
 ## Current state (2026-10-31)
 
-Build plan step 2: safe boot state, host-link framing, and the global commands `identify`, `list_objects`, `ping`. No object commands yet, so `list_objects` reports `m0` with an empty command list.
+Build plan step 3: safe boot state, host-link framing, the global commands `identify`, `list_objects`, `ping`, and a constant-speed relative `move` with `move_start` / `move_end` events.
 
 | File | Role |
 |---|---|
-| `board.h`, `board_table.c` | Board table (dev board: one stepper `m0`, pins as in `docs/build-plan.md`). Pure C |
+| `board.h`, `board_table.c` | Board table (dev board: one stepper `m0`, pins as in `docs/build-plan.md`) with each stepper's safe defaults (F-R34): 200 full steps/s, 20 us pulse width. At most 4 steppers, one per PIO0 state machine. Pure C |
+| `stepgen.pio`, `stepgen.c` / `.h` | Step pulse generator, one PIO0 state machine per stepper (details below). `stepgen.h` is pure C; host tests use `tests/dummy_stepgen.c` in place of `stepgen.c` |
+| `stepper.c` / `.h` | Stepper objects: motion state, the `move` command, `move_start` / `move_end` events (F-R1, F-R32). Pure C |
 | `board.c` | `board_safe_init()`: driver pins to their safe state |
 | `linebuf.c` / `.h` | Line assembler (F-R31). A line is at most 1024 bytes including its `\n`; an over-length line is dropped and reported once at its `\n`. Pure C |
 | `hostlink.c` / `.h` | Frame decoding, dispatch tables (global commands; per-type object commands), replies and `rx_error` events (F-R31, F-R33, F-R35). Writes through a callback. Pure C |
 | `version.h` | Firmware version for `identify` |
-| `main.c` | Calls `board_safe_init()` first (F-R23), then runs TinyUSB and feeds received bytes through the line assembler to the dispatcher |
+| `main.c` | Calls `board_safe_init()` first (F-R23), then sets up the step generators and runs a main loop: TinyUSB, received bytes through the line assembler to the dispatcher, then `stepper_poll()` |
 | `usb_descriptors.c`, `tusb_config.h` | TinyUSB used directly (not the SDK's `stdio_usb`), one CDC interface (F-R30). Development VID/PID `2E8A:000A`. The USB serial number is the flash unique ID, so `/dev/serial/by-id/` gives each board a stable path |
 
 Host-link details:
 - Frames are parsed with `cJSON_ParseWithOpts(..., require_null_terminated)`, so trailing non-whitespace makes a frame malformed (plain `cJSON_Parse` would ignore it). Trailing whitespace such as a terminal's `\r` is allowed. A line with an embedded NUL is malformed.
 - `seq` is read through `valuedouble` (exact for every uint32; `valueint` clamps at `INT_MAX`). Replies are printed into a fixed buffer with `cJSON_PrintPreallocated`.
 - The partial line is discarded on connect and disconnect (DTR edges). Unread bytes are flushed only on disconnect, since on connect the FIFO may already hold the host's first frame.
-- The pure-C modules are linked into the host unit tests (`tests/test_linebuf.c`, `tests/test_hostlink.c`). `tests/hostlink.py` is a stdlib-only client for manual tests on the board.
+- The pure-C modules are linked into the host unit tests (`tests/test_*.c`). `tests/hostlink.py` is a stdlib-only client for manual tests on the board. With `--wait`, it sends each frame only after the previous one's reply and the `move_end` of any move it started.
+
+Step generation details:
+- PIO word formats (`stepgen.pio`), tag in bit 0: a **single** word is one step, with the low delay in bits 31..1; a **repeat** word is `count - 1` in bits 31..1, followed by a word with the low delay. The high delay sits in the state machine's ISR, loaded by the CPU while the state machine is disabled.
+- Cycle counts: high time = high delay + 2; low time = low delay + 3 in a repeat word, + 6 for a single word (it includes fetching the next word). `stepgen.h` holds these as `STEPGEN_*_OVERHEAD`. The state machine runs at the full system clock, read at runtime (`clock_get_hz`).
+- So far only repeat pairs are used: a move is one pair, pushed by core 0 straight into the FIFO (DMA and per-step words come with the planner, step 4). The pulse rate is `speed * microsteps`; microsteps is fixed at 1 until step 6, since MS1–MS3 stay low.
+- A move is rejected with `bad_param` if the high time is under 1 us, or the low time would be under 1 us at this speed (F-R2), or if the target leaves the int32 position range. `steps: 0` is accepted before any of the timing checks, even at settings that would reject a real move. It queues nothing and marks the axis moving; the axis is already idle, so the next poll sends `move_start` and `move_end` together.
+- DIR (F-R4): `stepgen_set_dir()` waits 1 us after changing DIR, before any step is queued. DIR only changes while the axis is idle, and "idle" means the state machine is back at `top` with an empty FIFO, so the last step's low time (at least 1 us) has already run.
+- Finished moves are detected by `stepper_poll()` from that idle state. `move_start` is also sent from the poll, so it always follows the command's reply.
+- `move` doesn't check `not_configured` yet; that check comes with `settings_done` in step 6. ENABLE, SLEEP and RESET stay in their boot state, so a move pulses STEP and DIR with the driver still disabled.
 
 Safe state at boot: STEP low and ENABLE high (F-R23). F-R23 doesn't specify the other driver pins; they are driven low, which holds the A4988 asleep (SLEEP) and in reset (RESET), with DIR low and full-step microstepping (MS1–MS3 low).
 

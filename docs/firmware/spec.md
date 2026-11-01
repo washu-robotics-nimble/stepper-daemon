@@ -110,6 +110,8 @@ Object types (from the firmware's board table): `stepper`, `endstop`, `hx711`; l
 
 `not_configured`: motion before `settings_done`.
 
+A `move` with `steps: 0` is valid and sends the same events as any other move: `move_start`, then `move_end` (`reason: done`), both at the current position. It emits no steps.
+
 ### Endstop (`type: endstop`)
 
 | `cmd` | Args | Result |

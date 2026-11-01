@@ -10,6 +10,15 @@
 // objects by it. Retire an object by deleting its entry; a new object gets
 // a new oid.
 
+// One PIO block's state machines, one per stepper (stepgen.c)
+#define BOARD_MAX_STEPPERS 4
+
+// Safe built-in settings, used until the host overrides them (F-R34)
+typedef struct {
+    uint32_t speed;           // full steps/s
+    uint32_t pulse_width_us;  // STEP high time
+} board_motion_t;
+
 typedef struct {
     const char *oid;
     uint8_t step_pin;
@@ -18,6 +27,7 @@ typedef struct {
     uint8_t ms_pin[3];      // MS1..MS3
     uint8_t sleep_pin;      // A4988 SLEEP, active low
     uint8_t reset_pin;      // A4988 RESET, active low
+    board_motion_t defaults;
 } board_stepper_t;
 
 extern const board_stepper_t board_steppers[];

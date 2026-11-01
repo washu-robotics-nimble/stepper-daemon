@@ -1,0 +1,38 @@
+; Step pulse generator, one state machine per axis (F-R1, F-R2, F-R3).
+;
+; Every step is timed from FIFO words, so each step can have its own period
+; (smooth ramps, build plan step 4). Two word formats, bit 0 is the tag:
+;
+;   single:  bit 0 = 0, bits 31..1 = low delay        -> one step
+;   repeat:  bit 0 = 1, bits 31..1 = count - 1,
+;            then a second word = low delay           -> count steps
+;
+; ISR holds the high-time delay, loaded once by the CPU while the state
+; machine is disabled (stepgen.c), so it is the same for every step.
+;
+; Timing in state machine cycles (see the STEPGEN_* constants in stepgen.h):
+;   high time            = high delay + 2
+;   low time, repeat     = low delay  + 3
+;   low time, single     = low delay  + 6   (includes fetching the next word)
+;
+; With nothing queued, the state machine stalls at "top" with STEP low.
+
+.program stepgen
+.side_set 1 opt
+
+.wrap_target
+public top:
+    pull block              ; next word
+    out y, 1                ; y = tag
+    jmp !y step             ; single: osr = low delay, y = 0 -> one step
+    out y, 31               ; repeat: y = count - 1
+    pull block              ; osr = low delay
+step:
+    mov x, isr      side 1  ; STEP high
+high:
+    jmp x-- high
+    mov x, osr      side 0  ; STEP low
+low:
+    jmp x-- low
+    jmp y-- step            ; more steps in this word
+.wrap

@@ -58,7 +58,7 @@ Questions are at the end; answer them as before.
 - The per-step PIO program (firmware impl): one FIFO word per step, plus the "N steps at period P" cruise word. Only the cruise word is used in this step, pushed into the FIFO directly by the CPU; DMA comes in step 4.
 - `move` (relative only) at a fixed speed; `move_start` / `move_end` events.
 
-**Test (analyzer):** pulse count equals `steps` for several values (1, 2, 400, 100000). High time ≥ `pulse_width_us`, low time ≥ 1 µs (F-R2). DIR settles ≥ 200 ns before the first edge and holds ≥ 200 ns after the last (F-R4). F-R1 is met as long as the count is exact.
+**Test (analyzer):** pulse count equals `steps` for several values (1, 2, 400, 2000; at the 200 full steps/s default, 2000 steps take 10 s). High time ≥ `pulse_width_us`, low time ≥ 1 µs (F-R2). DIR settles ≥ 200 ns before the first edge and holds ≥ 200 ns after the last (F-R4). F-R1 is met as long as the count is exact.
 
 ### 4. Trapezoid ramps
 
