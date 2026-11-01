@@ -11,16 +11,25 @@ set(CMAKE_C_STANDARD 11)
 
 pico_sdk_init()
 
+set(LIB_DIR ${CMAKE_CURRENT_LIST_DIR}/../../lib)
+
 add_executable(stepper_fw
     main.c
     board.c
+    board_table.c
+    hostlink.c
+    linebuf.c
     usb_descriptors.c
+    ${LIB_DIR}/cJSON/cJSON.c
 )
 
 target_compile_options(stepper_fw PRIVATE -Wall)
 
 # tusb_config.h lives next to the sources
-target_include_directories(stepper_fw PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+target_include_directories(stepper_fw PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}
+    ${LIB_DIR}/cJSON
+)
 
 target_link_libraries(stepper_fw
     pico_stdlib

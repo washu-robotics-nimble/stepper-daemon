@@ -4,13 +4,23 @@ How the firmware meets [spec.md](spec.md). Update this file in the same commit a
 
 ## Current state (2026-10-31)
 
-Build plan step 1: safe boot state and a temporary USB echo.
+Build plan step 2: safe boot state, host-link framing, and the global commands `identify`, `list_objects`, `ping`. No object commands yet, so `list_objects` reports `m0` with an empty command list.
 
 | File | Role |
 |---|---|
-| `board.c` / `board.h` | Board table (dev board: one stepper `m0`, pins as in `docs/build-plan.md`) and `board_safe_init()` |
-| `main.c` | Calls `board_safe_init()` first (F-R23), then runs TinyUSB and echoes received bytes back (temporary, replaced by the host link in step 2) |
+| `board.h`, `board_table.c` | Board table (dev board: one stepper `m0`, pins as in `docs/build-plan.md`). Pure C |
+| `board.c` | `board_safe_init()`: driver pins to their safe state |
+| `linebuf.c` / `.h` | Line assembler (F-R31). A line is at most 1024 bytes including its `\n`; an over-length line is dropped and reported once at its `\n`. Pure C |
+| `hostlink.c` / `.h` | Frame decoding, dispatch tables (global commands; per-type object commands), replies and `rx_error` events (F-R31, F-R33, F-R35). Writes through a callback. Pure C |
+| `version.h` | Firmware version for `identify` |
+| `main.c` | Calls `board_safe_init()` first (F-R23), then runs TinyUSB and feeds received bytes through the line assembler to the dispatcher |
 | `usb_descriptors.c`, `tusb_config.h` | TinyUSB used directly (not the SDK's `stdio_usb`), one CDC interface (F-R30). Development VID/PID `2E8A:000A`. The USB serial number is the flash unique ID, so `/dev/serial/by-id/` gives each board a stable path |
+
+Host-link details:
+- Frames are parsed with `cJSON_ParseWithOpts(..., require_null_terminated)`, so trailing non-whitespace makes a frame malformed (plain `cJSON_Parse` would ignore it). Trailing whitespace such as a terminal's `\r` is allowed. A line with an embedded NUL is malformed.
+- `seq` is read through `valuedouble` (exact for every uint32; `valueint` clamps at `INT_MAX`). Replies are printed into a fixed buffer with `cJSON_PrintPreallocated`.
+- The partial line is discarded on connect and disconnect (DTR edges). Unread bytes are flushed only on disconnect, since on connect the FIFO may already hold the host's first frame.
+- The pure-C modules are linked into the host unit tests (`tests/test_linebuf.c`, `tests/test_hostlink.c`). `tests/hostlink.py` is a stdlib-only client for manual tests on the board.
 
 Safe state at boot: STEP low and ENABLE high (F-R23). F-R23 doesn't specify the other driver pins; they are driven low, which holds the A4988 asleep (SLEEP) and in reset (RESET), with DIR low and full-step microstepping (MS1–MS3 low).
 

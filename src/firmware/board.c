@@ -1,19 +1,6 @@
+// Board pin setup. The table itself is in board_table.c.
 #include "board.h"
 #include "hardware/gpio.h"
-
-// Dev board: bare RPi Pico on the bench (pin map in docs/build-plan.md)
-const board_stepper_t board_steppers[] = {
-    {
-        .oid        = "m0",
-        .step_pin   = 2,
-        .dir_pin    = 3,
-        .enable_pin = 4,
-        .ms_pin     = {5, 6, 7},
-        .sleep_pin  = 8,
-        .reset_pin  = 9,
-    },
-};
-const size_t board_stepper_count = sizeof board_steppers / sizeof board_steppers[0];
 
 // Set the level before switching to output, so the pin never glitches
 static void output_init(uint8_t pin, bool level)

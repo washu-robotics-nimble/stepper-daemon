@@ -135,7 +135,7 @@ Object types (from the firmware's board table): `stepper`, `endstop`, `hx711`; l
 | `endstop` | `oid`, `state` |
 | `fault` | `oid` (optional), `code` (e.g. `home_timeout`) |
 | `link_recovered` | - Sent once when the link returns after a loss; motion was stopped (F-R22) |
-| `rx_error` | `err` (`too_long` / `bad_json`). Sent for a dropped frame, since its `seq` is unknown; the host's pending request then times out (D-R30) |
+| `rx_error` | `err` (`too_long` / `bad_json` / `no_seq`). Sent for a dropped frame, since its `seq` is unknown; the host's pending request then times out (D-R30). `no_seq`: valid JSON, but `seq` is missing or not an integer in uint32 range |
 
 ### Error codes
 

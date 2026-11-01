@@ -1,7 +1,9 @@
 /lib/lg/*/
 motor_demo
 /build/
+/build-debug/
 /src/firmware/build/
+/src/firmware/build-debug/
 *.o
 /lg-master/
 /.vscode/

@@ -51,7 +51,7 @@ Questions are at the end; answer them as before.
 - `identify`, `list_objects`, `ping`; errors `unknown_cmd`, `unknown_oid`, `bad_param`; `rx_error` event (F-R31, F-R33, F-R35).
 - The line assembler and dispatch have no SDK dependencies, so they also compile on the host.
 
-**Test:** host unit tests for the assembler (over-length, partial lines, garbage). On the Pico, type JSON by hand and check the replies.
+**Test:** host unit tests for the assembler and dispatcher (over-length, partial lines, garbage, every error code). On the Pico, send frames with `tests/hostlink.py` and check the replies.
 
 ### 3. Constant-speed `move` on PIO
 
