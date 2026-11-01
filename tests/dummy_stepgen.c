@@ -50,6 +50,16 @@ bool stepgen_idle(size_t axis)
     return !dummy_axes[axis].busy;
 }
 
+uint32_t stepgen_stop(size_t axis)
+{
+    dummy_axis_t *a = &dummy_axes[axis];
+    if (a->busy) {
+        a->busy = false;
+        a->stops++;
+    }
+    return a->emitted;
+}
+
 uint32_t stepgen_underruns(size_t axis)
 {
     return dummy_axes[axis].underruns;

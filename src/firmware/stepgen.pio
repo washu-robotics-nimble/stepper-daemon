@@ -36,3 +36,17 @@ low:
     jmp x-- low
     jmp y-- step            ; more steps in this word
 .wrap
+
+; Step counter, one state machine per axis on the other PIO block (F-R1).
+; Counts rising edges on the STEP pin, so a move's emitted step count comes
+; from the pin itself, whatever words were queued. X counts down from 0, one
+; per edge; the CPU reads it with "mov isr, x" and "push" (stepgen.c).
+
+.program stepcount
+
+.wrap_target
+count:
+    wait 0 pin 0
+    wait 1 pin 0            ; rising edge
+    jmp x-- count           ; x - 1; at 0 it falls through and wraps
+.wrap

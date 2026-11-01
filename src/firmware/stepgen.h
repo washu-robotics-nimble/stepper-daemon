@@ -55,6 +55,13 @@ void stepgen_start(size_t axis, const planner_t *plan);
 // its last step
 bool stepgen_idle(size_t axis);
 
+// Stop the move now (F-R21, F-R24): no step starts after this, and a pulse
+// already high is held for the full high time, so the driver sees it. The
+// axis is idle on return. Returns the number of steps the move emitted,
+// counted on the STEP pin (F-R1). On an idle axis it changes nothing and
+// returns the last move's count.
+uint32_t stepgen_stop(size_t axis);
+
 // Number of times the state machine has run out of words in the middle of a
 // move (F-R3): each is a late step. Counts up from 0 at boot and never
 // resets; the caller keeps the last value it has seen.

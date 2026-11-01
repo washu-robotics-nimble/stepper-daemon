@@ -16,10 +16,14 @@ typedef struct {
 
 typedef struct {
     motion_t motion;
-    int32_t  pos;             // full steps
-    bool     moving;
+    int32_t  pos;             // full steps; during a move, where it started
+    bool     moving;          // until move_end is sent
     bool     start_pending;   // move_start not sent yet
+    const char *end_reason;   // move_end pending, with this reason
     int32_t  target;          // pos once the move is done
+    bool     stepping;        // the step generator runs this move (not a
+                              // move of 0 steps)
+    bool     forward;         // direction of the move
     uint32_t underruns;       // stepgen_underruns() already reported
 } axis_t;
 
@@ -83,11 +87,41 @@ void stepper_poll(void)
             send_fault(i, "step_underrun");
         }
 
-        if (a->moving && stepgen_idle(i)) {
-            a->moving = false;
+        if (a->moving && a->end_reason == NULL && stepgen_idle(i)) {
             a->pos = a->target;
-            send_move_event(i, "move_end", "done");
+            a->end_reason = "done";
         }
+
+        // Also sent from here after stop and estop, so it follows the reply
+        if (a->end_reason != NULL) {
+            send_move_event(i, "move_end", a->end_reason);
+            a->end_reason = NULL;
+            a->moving = false;
+        }
+    }
+}
+
+// Cut the move short now (F-R21, F-R24): the position becomes the steps
+// actually emitted (F-R1), and move_end follows with reason
+static void halt(size_t i, const char *reason)
+{
+    axis_t *a = &axes[i];
+
+    if (a->stepping) {
+        uint32_t pulses = stepgen_stop(i);
+        int64_t steps = pulses / a->motion.microsteps;
+        a->pos = (int32_t)(a->forward ? a->pos + steps : a->pos - steps);
+        a->stepping = false;
+    }
+    a->end_reason = reason;
+}
+
+void stepper_estop(void)
+{
+    for (size_t i = 0; i < board_stepper_count; i++) {
+        if (axes[i].moving && axes[i].end_reason == NULL)
+            halt(i, "estop");
+        board_set_enable(i, false);
     }
 }
 
@@ -110,6 +144,7 @@ static const char *start_move(size_t i, int32_t steps)
         // move_start and move_end together, as for any finished move
         a->target = a->pos;
         a->moving = true;
+        a->stepping = false;
         a->start_pending = true;
         return NULL;
     }
@@ -145,6 +180,8 @@ static const char *start_move(size_t i, int32_t steps)
 
     a->target = (int32_t)target;
     a->moving = true;
+    a->stepping = true;
+    a->forward = steps > 0;
     a->start_pending = true;
     return NULL;
 }
@@ -159,7 +196,32 @@ static const char *cmd_move(const cJSON *req, cJSON *reply, size_t index)
     return start_move(index, steps);
 }
 
+static const char *cmd_stop(const cJSON *req, cJSON *reply, size_t index)
+{
+    (void)req;
+    axis_t *a = &axes[index];
+
+    if (!a->moving || a->end_reason != NULL)
+        return "not_moving";
+    halt(index, "stop");
+    cJSON_AddNumberToObject(reply, "pos", a->pos);
+    return NULL;
+}
+
+static const char *cmd_set_enable(const cJSON *req, cJSON *reply, size_t index)
+{
+    (void)reply;
+    int32_t value;
+
+    if (!hostlink_get_int32(req, "value", &value) || (value != 0 && value != 1))
+        return "bad_param";
+    board_set_enable(index, value == 1);
+    return NULL;
+}
+
 const hostlink_cmd_t stepper_cmds[] = {
-    {"move", cmd_move},
+    {"move",       cmd_move},
+    {"stop",       cmd_stop},
+    {"set_enable", cmd_set_enable},
     {NULL, NULL},
 };

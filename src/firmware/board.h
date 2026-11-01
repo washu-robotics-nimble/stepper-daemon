@@ -1,6 +1,7 @@
 #ifndef BOARD_H
 #define BOARD_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -10,7 +11,8 @@
 // objects by it. Retire an object by deleting its entry; a new object gets
 // a new oid.
 
-// One PIO block's state machines, one per stepper (stepgen.c)
+// One state machine per stepper in each of the two PIO blocks: the step
+// generator, and its step counter (stepgen.c)
 #define BOARD_MAX_STEPPERS 4
 
 // Safe built-in settings, used until the host overrides them (F-R34)
@@ -36,5 +38,11 @@ extern const size_t board_stepper_count;
 
 // Drive every driver output to its safe state (F-R23). Call first in main.
 void board_safe_init(void);
+
+// Driver ENABLE of stepper i, on host command (F-R10). Enabling first wakes
+// the driver if it is asleep or in reset: RESET and SLEEP high, then the
+// A4988's 1 ms wake-up time, then ENABLE low. Disabling only drives ENABLE
+// high; SLEEP and RESET stay high.
+void board_set_enable(size_t i, bool on);
 
 #endif

@@ -18,6 +18,8 @@ typedef struct {
     int       starts;         // stepgen_start() calls
     bool      busy;           // set by a start; tests clear it to "finish"
     uint32_t  underruns;      // returned by stepgen_underruns(); tests set it
+    uint32_t  emitted;        // returned by stepgen_stop(); tests set it
+    int       stops;          // stepgen_stop() calls on a busy axis
 } dummy_axis_t;
 
 extern dummy_axis_t dummy_axes[];

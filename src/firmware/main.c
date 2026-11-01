@@ -4,10 +4,16 @@
 #include "board.h"
 #include "hostlink.h"
 #include "linebuf.h"
+#include "linequeue.h"
 #include "stepgen.h"
 #include "stepper.h"
 
 static linebuf_t rx;
+static linequeue_t queue;
+
+// Bytes read from USB but not yet assembled, kept while the queue is full
+static uint8_t carry[64];
+static uint32_t carry_len, carry_pos;
 
 // Set from the TinyUSB callback, handled in the main loop
 static volatile bool host_opened;
@@ -45,11 +51,13 @@ static void usb_write(const char *data, size_t len)
 static void rx_task(void)
 {
     // Discard any partial line on disconnect and on connect (F-R31).
-    // Unread bytes are flushed only on disconnect: on connect, the FIFO may
-    // already hold the host's first frame.
+    // Unread and queued input is dropped only on disconnect: on connect,
+    // the FIFO may already hold the host's first frame.
     if (host_closed) {
         host_closed = false;
         tud_cdc_read_flush();
+        carry_len = carry_pos = 0;
+        linequeue_reset(&queue);
         linebuf_reset(&rx);
     }
     if (host_opened) {
@@ -57,21 +65,42 @@ static void rx_task(void)
         linebuf_reset(&rx);
     }
 
-    uint8_t chunk[64];
-    while (tud_cdc_available()) {
-        uint32_t n = tud_cdc_read(chunk, sizeof chunk);
-        for (uint32_t i = 0; i < n; i++) {
-            switch (linebuf_put(&rx, (char)chunk[i])) {
-            case LINEBUF_LINE:
-                hostlink_handle_line(rx.buf, rx.len);
+    // Assemble everything received into lines while the queue has room. An
+    // estop runs as soon as its line is complete, ahead of every line still
+    // queued (F-R24).
+    while (!linequeue_full(&queue)) {
+        if (carry_pos == carry_len) {
+            carry_len = tud_cdc_available() ? tud_cdc_read(carry, sizeof carry) : 0;
+            carry_pos = 0;
+            if (carry_len == 0)
                 break;
-            case LINEBUF_TOO_LONG:
-                hostlink_rx_error("too_long");
-                break;
-            case LINEBUF_NONE:
-                break;
-            }
         }
+        switch (linebuf_put(&rx, (char)carry[carry_pos++])) {
+        case LINEBUF_LINE:
+            if (hostlink_is_estop(rx.buf, rx.len))
+                hostlink_handle_line(rx.buf, rx.len);
+            else
+                linequeue_push(&queue, rx.buf, rx.len);
+            break;
+        case LINEBUF_TOO_LONG:
+            linequeue_push_too_long(&queue);
+            break;
+        case LINEBUF_NONE:
+            break;
+        }
+    }
+
+    // One queued line per pass of the main loop, so events from
+    // stepper_poll() (e.g. a stopped move's move_end) come before the next
+    // command runs
+    if (!linequeue_empty(&queue)) {
+        size_t len;
+        const char *line = linequeue_front(&queue, &len);
+        if (line != NULL)
+            hostlink_handle_line(line, len);
+        else
+            hostlink_rx_error("too_long");
+        linequeue_drop(&queue);
     }
 }
 
@@ -84,6 +113,7 @@ int main(void)
     stepper_init();
 
     linebuf_reset(&rx);
+    linequeue_reset(&queue);
     hostlink_init(usb_write);
     tusb_init();
 

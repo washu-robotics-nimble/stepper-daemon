@@ -110,6 +110,8 @@ Object types (from the firmware's board table): `stepper`, `endstop`, `hx711`; l
 
 `not_configured`: motion before `settings_done`.
 
+`set_enable` with `value: 1` also wakes the driver if it is asleep or in reset: SLEEP and RESET are driven high, and ENABLE goes low after the A4988's 1 ms wake-up time. `value: 0` (and `estop`) only disables the driver; SLEEP and RESET stay high. These are the only commands that drive SLEEP and RESET (F-R10).
+
 `accel` MUST be at least 1; 0 is rejected with `bad_param`. There is no setting that turns ramping off: a very large `accel` gives, in effect, a constant-speed move.
 
 A `move` with `steps: 0` is valid and sends the same events as any other move: `move_start`, then `move_end` (`reason: done`), both at the current position. It emits no steps.

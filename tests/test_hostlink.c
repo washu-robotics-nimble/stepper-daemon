@@ -146,6 +146,33 @@ static void test_dropped_frames(void)
     assert(nlines == 1 && strstr(lines[0], "\"too_long\"") != NULL);
 }
 
+static void test_estop_detection(void)
+{
+    // Lines the receive path runs ahead of the queue (F-R24)
+    const char *yes[] = {
+        "{\"seq\":1,\"cmd\":\"estop\"}",
+        "{ \"cmd\" : \"estop\", \"seq\" : 2 }\r",
+        // Handled early, then dropped as usual (no_seq)
+        "{\"cmd\":\"estop\"}",
+    };
+    for (size_t i = 0; i < sizeof yes / sizeof yes[0]; i++)
+        assert(hostlink_is_estop(yes[i], strlen(yes[i])));
+
+    const char *no[] = {
+        "{\"seq\":1,\"cmd\":\"ping\"}",
+        "{\"seq\":1,\"cmd\":\"ping\",\"note\":\"estop\"}",
+        "{\"seq\":1,\"cmd\":\"estop\"",
+        "{\"seq\":1,\"cmd\":\"estop\"} junk",
+        "{\"seq\":1,\"cmd\":\"estops\"}",
+    };
+    for (size_t i = 0; i < sizeof no / sizeof no[0]; i++)
+        assert(!hostlink_is_estop(no[i], strlen(no[i])));
+    assert(!hostlink_is_estop("{\"seq\":1,\"cmd\":\"estop\"}\0x", 24));
+
+    expect_ack("{\"seq\":11,\"cmd\":\"estop\"}", 11);
+    expect_rx_error("{\"cmd\":\"estop\"}", "no_seq");
+}
+
 int main(void)
 {
     hostlink_init(capture);
@@ -154,6 +181,7 @@ int main(void)
     test_seq_echo();
     test_command_errors();
     test_dropped_frames();
+    test_estop_detection();
     printf("test_hostlink: ok\n");
     return 0;
 }

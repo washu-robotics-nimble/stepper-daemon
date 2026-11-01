@@ -72,10 +72,21 @@ static const char *cmd_ping(const cJSON *req, cJSON *reply, size_t index)
     return NULL;
 }
 
+// F-R24. The receive path runs it ahead of queued lines (hostlink_is_estop())
+static const char *cmd_estop(const cJSON *req, cJSON *reply, size_t index)
+{
+    (void)req;
+    (void)reply;
+    (void)index;
+    stepper_estop();
+    return NULL;
+}
+
 static const hostlink_cmd_t global_cmds[] = {
     {"identify",     cmd_identify},
     {"list_objects", cmd_list_objects},
     {"ping",         cmd_ping},
+    {"estop",        cmd_estop},
     {NULL, NULL},
 };
 
@@ -184,6 +195,19 @@ static const hostlink_cmd_t *resolve(const cJSON *req, const char *name,
     if (cmd == NULL)
         *err = "unknown_cmd";
     return cmd;
+}
+
+bool hostlink_is_estop(const char *line, size_t len)
+{
+    // Cheap test first: most lines never get parsed twice
+    if (strlen(line) != len || strstr(line, "estop") == NULL)
+        return false;
+
+    cJSON *req = cJSON_ParseWithOpts(line, NULL, true);
+    const cJSON *name = cJSON_GetObjectItemCaseSensitive(req, "cmd");
+    bool estop = cJSON_IsString(name) && strcmp(name->valuestring, "estop") == 0;
+    cJSON_Delete(req);
+    return estop;
 }
 
 void hostlink_handle_line(const char *line, size_t len)

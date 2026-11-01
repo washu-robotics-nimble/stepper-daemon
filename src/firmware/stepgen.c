@@ -11,8 +11,10 @@
 #include "board.h"
 #include "stepgen.pio.h"
 
-// Axis i runs on state machine i of this PIO block
+// Axis i runs on state machine i of this PIO block, and its step counter
+// on state machine i of the other
 static PIO const pio = pio0;
+static PIO const counter = pio1;
 static uint offset;
 
 // Words per DMA buffer. Two per axis: while DMA streams one into the FIFO,
@@ -28,6 +30,12 @@ typedef struct {
     volatile bool active;         // set by core 0 to start a move; cleared by
                                   // core 1 once all of it is in the FIFO
     volatile uint32_t underruns;  // counted by core 1
+    volatile bool stop_req;       // set by core 0; core 1 drops the move and
+                                  // clears it
+
+    // Core 0 only
+    uint32_t high;                // STEP high time, cycles
+    uint32_t start_count;         // step counter at the start of the move
 
     // Core 1 only, main loop and DMA interrupt
     uint dma;
@@ -126,9 +134,33 @@ static void begin(size_t i)
     restore_interrupts(irqs);
 }
 
+// Drop the move (stepgen_stop()): abort DMA, forget the buffers
+static void abort_feed(size_t i)
+{
+    feed_t *f = &feeds[i];
+    uint32_t irqs = save_and_disable_interrupts();
+
+    // Aborting may raise a spurious completion interrupt (RP2040-E13)
+    dma_channel_set_irq1_enabled(f->dma, false);
+    dma_channel_abort(f->dma);
+    dma_channel_acknowledge_irq1(f->dma);
+    dma_channel_set_irq1_enabled(f->dma, true);
+
+    f->state[0] = f->state[1] = BUF_EMPTY;
+    f->running = false;
+    f->active = false;
+    f->stop_req = false;
+    restore_interrupts(irqs);
+}
+
 static void feed(size_t i)
 {
     feed_t *f = &feeds[i];
+
+    if (f->stop_req) {
+        abort_feed(i);
+        return;
+    }
 
     if (!f->running) {
         if (f->active)
@@ -164,9 +196,20 @@ static void core1_main(void)
 
 // ---- Core 0 -----
 
+// Steps counted on the axis's STEP pin since boot (wraps at 2^32)
+static uint32_t count_now(size_t axis)
+{
+    uint sm = (uint)axis;
+
+    pio_sm_exec(counter, sm, pio_encode_mov(pio_isr, pio_x));
+    pio_sm_exec(counter, sm, pio_encode_push(false, false));
+    return 0u - pio_sm_get_blocking(counter, sm);
+}
+
 void stepgen_init(void)
 {
     offset = pio_add_program(pio, &stepgen_program);
+    uint count_offset = pio_add_program(counter, &stepcount_program);
 
     for (size_t i = 0; i < board_stepper_count; i++) {
         uint sm = (uint)i;
@@ -199,6 +242,15 @@ void stepgen_init(void)
         channel_config_set_dreq(&d, pio_get_dreq(pio, sm, true));
         dma_channel_configure(f->dma, &d, &pio->txf[sm], NULL, 0, false);
         dma_channel_set_irq1_enabled(f->dma, true);
+
+        // Step counter: reads the STEP pin's input, so the pin stays with
+        // the step generator's PIO block
+        pio_sm_claim(counter, sm);
+        pio_sm_config k = stepcount_program_get_default_config(count_offset);
+        sm_config_set_in_pins(&k, pin);
+        sm_config_set_clkdiv_int_frac(&k, 1, 0);
+        pio_sm_init(counter, sm, count_offset, &k);
+        pio_sm_set_enabled(counter, sm, true);
     }
 
     multicore_launch_core1(core1_main);
@@ -216,6 +268,7 @@ void stepgen_set_high(size_t axis, uint32_t cycles)
 
     // Load ISR through the FIFO with the state machine stopped, so its own
     // stalled "pull" can't take the value
+    feeds[axis].high = cycles;
     pio_sm_set_enabled(pio, sm, false);
     pio_sm_put(pio, sm, cycles - STEPGEN_HIGH_OVERHEAD);
     pio_sm_exec(pio, sm, pio_encode_pull(false, true));
@@ -238,6 +291,7 @@ void stepgen_start(size_t axis, const planner_t *plan)
 {
     feed_t *f = &feeds[axis];
 
+    f->start_count = count_now(axis);
     f->plan = *plan;
     __dmb();   // the plan is in place before core 1 sees active
     f->active = true;
@@ -258,4 +312,41 @@ bool stepgen_idle(size_t axis)
 uint32_t stepgen_underruns(size_t axis)
 {
     return feeds[axis].underruns;
+}
+
+uint32_t stepgen_stop(size_t axis)
+{
+    uint sm = (uint)axis;
+    uint pin = board_steppers[axis].step_pin;
+    feed_t *f = &feeds[axis];
+
+    if (stepgen_idle(axis))
+        return count_now(axis) - f->start_count;
+
+    // Halted between two instructions: no step starts after this
+    pio_sm_set_enabled(pio, sm, false);
+
+    // A pulse already high gets its full high time (F-R2), so the driver
+    // takes the step, as the counter already has
+    if (gpio_get(pin)) {
+        busy_wait_at_least_cycles(f->high);
+        pio_sm_set_pins_with_mask(pio, sm, 0, 1u << pin);
+    }
+
+    // Core 1 drops the move; it answers within one pass of its loop
+    f->stop_req = true;
+    while (f->stop_req)
+        tight_loop_contents();
+
+    // Drop the queued words, and restart idle at "top". Changing a FIFO
+    // join clears both FIFOs; toggling the TX join (rather than RX, as
+    // pio_sm_clear_fifos() does) never has both joined at once.
+    hw_xor_bits(&pio->sm[sm].shiftctrl, PIO_SM0_SHIFTCTRL_FJOIN_TX_BITS);
+    hw_xor_bits(&pio->sm[sm].shiftctrl, PIO_SM0_SHIFTCTRL_FJOIN_TX_BITS);
+    pio_sm_restart(pio, sm);   // also clears ISR, the high delay
+    pio_sm_exec(pio, sm, pio_encode_jmp(offset + stepgen_offset_top));
+    stepgen_set_high(axis, f->high);
+    pio_sm_set_enabled(pio, sm, true);
+
+    return count_now(axis) - f->start_count;
 }

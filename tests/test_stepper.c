@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "cJSON.h"
+#include "dummy_board.h"
 #include "dummy_stepgen.h"
 #include "hostlink.h"
 #include "stepper.h"
@@ -204,14 +205,157 @@ static void test_underrun(void)
     expect_event(1, "move_end", 0, "done");
 }
 
+// Expect a stop's reply: ack with pos
+static void expect_stop_reply(double pos)
+{
+    assert(nlines == 1);
+    cJSON *r = line_json(0);
+    assert(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "ack")));
+    assert(cJSON_GetObjectItemCaseSensitive(r, "pos")->valuedouble == pos);
+    cJSON_Delete(r);
+}
+
+static void test_stop(void)
+{
+    dummy_axis_t *a = &dummy_axes[0];
+
+    send_line("{\"seq\":20,\"cmd\":\"stop\",\"oid\":\"m0\"}");
+    expect_reply("not_moving");
+
+    // Stopped after 150 of 400 steps: pos is what was emitted (F-R1)
+    send_line("{\"seq\":21,\"cmd\":\"move\",\"oid\":\"m0\",\"steps\":400}");
+    expect_reply(NULL);
+    poll();
+    a->emitted = 150;
+    int stops = a->stops;
+    send_line("{\"seq\":22,\"cmd\":\"stop\",\"oid\":\"m0\"}");
+    expect_stop_reply(150);
+    assert(a->stops == stops + 1);
+
+    // Still moving until move_end is out, which follows the reply
+    send_line("{\"seq\":23,\"cmd\":\"move\",\"oid\":\"m0\",\"steps\":1}");
+    expect_reply("busy");
+    send_line("{\"seq\":24,\"cmd\":\"stop\",\"oid\":\"m0\"}");
+    expect_reply("not_moving");
+    poll();
+    assert(nlines == 1);
+    expect_event(0, "move_end", 150, "stop");
+    poll();
+    assert(nlines == 0);
+
+    // Negative move: emitted steps count down
+    send_line("{\"seq\":25,\"cmd\":\"move\",\"oid\":\"m0\",\"steps\":-100}");
+    expect_reply(NULL);
+    poll();
+    a->emitted = 30;
+    send_line("{\"seq\":26,\"cmd\":\"stop\",\"oid\":\"m0\"}");
+    expect_stop_reply(120);
+    poll();
+    expect_event(0, "move_end", 120, "stop");
+
+    // Stopped before move_start was out: both events, in order
+    send_line("{\"seq\":27,\"cmd\":\"move\",\"oid\":\"m0\",\"steps\":10}");
+    expect_reply(NULL);
+    a->emitted = 0;
+    send_line("{\"seq\":28,\"cmd\":\"stop\",\"oid\":\"m0\"}");
+    expect_stop_reply(120);
+    poll();
+    assert(nlines == 2);
+    expect_event(0, "move_start", 120, NULL);
+    expect_event(1, "move_end", 120, "stop");
+
+    // A move of 0 steps can be stopped too; nothing to halt
+    stops = a->stops;
+    a->emitted = 99;   // the last move's count: must not be used
+    send_line("{\"seq\":29,\"cmd\":\"move\",\"oid\":\"m0\",\"steps\":0}");
+    expect_reply(NULL);
+    send_line("{\"seq\":30,\"cmd\":\"stop\",\"oid\":\"m0\"}");
+    expect_stop_reply(120);
+    assert(a->stops == stops);
+    poll();
+    assert(nlines == 2);
+    expect_event(1, "move_end", 120, "stop");
+}
+
+static void test_set_enable(void)
+{
+    send_line("{\"seq\":31,\"cmd\":\"set_enable\",\"oid\":\"m0\",\"value\":1}");
+    expect_reply(NULL);
+    assert(dummy_enabled[0]);
+    send_line("{\"seq\":32,\"cmd\":\"set_enable\",\"oid\":\"m0\",\"value\":0}");
+    expect_reply(NULL);
+    assert(!dummy_enabled[0]);
+
+    const char *bad[] = {
+        "{\"seq\":33,\"cmd\":\"set_enable\",\"oid\":\"m0\"}",
+        "{\"seq\":33,\"cmd\":\"set_enable\",\"oid\":\"m0\",\"value\":2}",
+        "{\"seq\":33,\"cmd\":\"set_enable\",\"oid\":\"m0\",\"value\":true}",
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        send_line(bad[i]);
+        expect_reply("bad_param");
+    }
+}
+
+static void test_estop(void)
+{
+    dummy_axis_t *a = &dummy_axes[0];
+
+    send_line("{\"seq\":40,\"cmd\":\"set_enable\",\"oid\":\"m0\",\"value\":1}");
+    expect_reply(NULL);
+
+    // Halts the move and disables the driver (F-R24)
+    send_line("{\"seq\":41,\"cmd\":\"move\",\"oid\":\"m0\",\"steps\":400}");
+    expect_reply(NULL);
+    poll();
+    a->emitted = 7;
+    send_line("{\"seq\":42,\"cmd\":\"estop\"}");
+    expect_reply(NULL);
+    assert(!a->busy);
+    assert(!dummy_enabled[0]);
+    poll();
+    assert(nlines == 1);
+    expect_event(0, "move_end", 127, "estop");
+
+    // Idle: only disables
+    send_line("{\"seq\":43,\"cmd\":\"set_enable\",\"oid\":\"m0\",\"value\":1}");
+    expect_reply(NULL);
+    send_line("{\"seq\":44,\"cmd\":\"estop\"}");
+    expect_reply(NULL);
+    assert(!dummy_enabled[0]);
+    poll();
+    assert(nlines == 0);
+
+    // A stop already pending keeps its reason
+    send_line("{\"seq\":45,\"cmd\":\"move\",\"oid\":\"m0\",\"steps\":5}");
+    expect_reply(NULL);
+    poll();
+    a->emitted = 2;
+    send_line("{\"seq\":46,\"cmd\":\"stop\",\"oid\":\"m0\"}");
+    expect_stop_reply(129);
+    send_line("{\"seq\":47,\"cmd\":\"estop\"}");
+    expect_reply(NULL);
+    poll();
+    assert(nlines == 1);
+    expect_event(0, "move_end", 129, "stop");
+
+    // Not latched: moves work again afterwards
+    send_line("{\"seq\":48,\"cmd\":\"move\",\"oid\":\"m0\",\"steps\":1}");
+    expect_reply(NULL);
+    poll();
+    finish(130);
+}
+
 static void test_listed(void)
 {
     send_line("{\"seq\":9,\"cmd\":\"list_objects\"}");
     cJSON *r = line_json(0);
     const cJSON *cmds = cJSON_GetObjectItemCaseSensitive(
         cJSON_GetObjectItemCaseSensitive(r, "types"), "stepper");
-    assert(cJSON_GetArraySize(cmds) == 1);
-    assert(strcmp(cJSON_GetArrayItem(cmds, 0)->valuestring, "move") == 0);
+    const char *names[] = {"move", "stop", "set_enable"};
+    assert(cJSON_GetArraySize(cmds) == 3);
+    for (int i = 0; i < 3; i++)
+        assert(strcmp(cJSON_GetArrayItem(cmds, i)->valuestring, names[i]) == 0);
     cJSON_Delete(r);
 }
 
@@ -226,6 +370,9 @@ int main(void)
     test_bad_steps();
     test_position_range();
     test_underrun();
+    test_stop();
+    test_set_enable();
+    test_estop();
     test_listed();
     printf("test_stepper: ok\n");
     return 0;

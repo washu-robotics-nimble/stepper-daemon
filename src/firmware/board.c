@@ -1,6 +1,7 @@
 // Board pin setup. The table itself is in board_table.c.
 #include "board.h"
 #include "hardware/gpio.h"
+#include "pico/time.h"
 
 // Set the level before switching to output, so the pin never glitches
 static void output_init(uint8_t pin, bool level)
@@ -27,4 +28,16 @@ void board_safe_init(void)
         output_init(s->sleep_pin, 0);
         output_init(s->reset_pin, 0);
     }
+}
+
+void board_set_enable(size_t i, bool on)
+{
+    const board_stepper_t *s = &board_steppers[i];
+
+    if (on && !(gpio_get_out_level(s->sleep_pin) && gpio_get_out_level(s->reset_pin))) {
+        gpio_put(s->reset_pin, 1);
+        gpio_put(s->sleep_pin, 1);
+        busy_wait_us_32(1000);   // A4988 wake-up time before stepping
+    }
+    gpio_put(s->enable_pin, !on);   // active low
 }

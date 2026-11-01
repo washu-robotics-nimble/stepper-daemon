@@ -31,6 +31,10 @@ void hostlink_init(hostlink_write_fn write);
 // received, so an embedded NUL can be detected.
 void hostlink_handle_line(const char *line, size_t len);
 
+// True if the line is an estop command, which the receive path then handles
+// ahead of the lines already queued (F-R24). Handle it as any other line.
+bool hostlink_is_estop(const char *line, size_t len);
+
 // Report a frame dropped before it could be decoded (rx_error event)
 void hostlink_rx_error(const char *err);
 

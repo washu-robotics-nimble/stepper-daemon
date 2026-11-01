@@ -19,6 +19,7 @@ add_executable(stepper_fw
     board_table.c
     hostlink.c
     linebuf.c
+    linequeue.c
     planner.c
     stepgen.c
     stepper.c

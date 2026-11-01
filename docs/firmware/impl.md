@@ -2,27 +2,28 @@
 
 How the firmware meets [spec.md](spec.md). Update this file in the same commit as any structural change to the firmware.
 
-## Current state (2026-10-31)
+## Current state (2026-11-01)
 
-Build plan step 4: safe boot state, host-link framing, the global commands `identify`, `list_objects`, `ping`, and a relative `move` with trapezoid ramps, `move_start` / `move_end` events, and `fault` events for late steps.
+Build plan step 5: safe boot state, host-link framing, the global commands `identify`, `list_objects`, `ping`, `estop`, and the stepper commands `move` (relative, trapezoid ramps), `stop` and `set_enable`, with `move_start` / `move_end` events and `fault` events for late steps.
 
 | File | Role |
 |---|---|
-| `board.h`, `board_table.c` | Board table (dev board: one stepper `m0`, pins as in `docs/build-plan.md`) with each stepper's safe defaults (F-R34): 200 full steps/s, 400 full steps/s^2, 20 us pulse width. At most 4 steppers, one per PIO0 state machine. Pure C |
-| `stepgen.pio`, `stepgen.c` / `.h` | Step pulse generator, one PIO0 state machine per stepper, fed by DMA from core 1 (details below). `stepgen.h` is pure C; host tests use `tests/dummy_stepgen.c` in place of `stepgen.c` |
+| `board.h`, `board_table.c` | Board table (dev board: one stepper `m0`, pins as in `docs/build-plan.md`) with each stepper's safe defaults (F-R34): 200 full steps/s, 400 full steps/s^2, 20 us pulse width. At most 4 steppers: each takes a PIO0 state machine (step generator) and a PIO1 state machine (step counter). (see Known gaps). Pure C |
+| `stepgen.pio`, `stepgen.c` / `.h` | Step pulse generator, one PIO0 state machine per stepper, fed by DMA from core 1, and a step counter on PIO1 (details below). `stepgen.h` is pure C; host tests use `tests/dummy_stepgen.c` in place of `stepgen.c` |
 | `planner.c` / `.h` | Per-step trapezoid planner (F-R5): turns a move into PIO words, a chunk at a time. Pure C |
-| `stepper.c` / `.h` | Stepper objects: motion state, the `move` command, `move_start` / `move_end` events (F-R1, F-R32). Pure C |
-| `board.c` | `board_safe_init()`: driver pins to their safe state |
+| `stepper.c` / `.h` | Stepper objects: motion state, the `move`, `stop` and `set_enable` commands, emergency stop, `move_start` / `move_end` events (F-R1, F-R10, F-R21, F-R24, F-R32). Pure C; host tests use `tests/dummy_board.c` for the driver pins |
+| `board.c` | `board_safe_init()`: driver pins to their safe state. `board_set_enable()`: driver ENABLE, waking the driver first (below) |
 | `linebuf.c` / `.h` | Line assembler (F-R31). A line is at most 1024 bytes including its `\n`; an over-length line is dropped and reported once at its `\n`. Pure C |
-| `hostlink.c` / `.h` | Frame decoding, dispatch tables (global commands; per-type object commands), replies and `rx_error` events (F-R31, F-R33, F-R35). Writes through a callback. Pure C |
+| `linequeue.c` / `.h` | Received lines waiting for dispatch, 8 slots (F-R24, below). Pure C |
+| `hostlink.c` / `.h` | Frame decoding, dispatch tables (global commands; per-type object commands), replies and `rx_error` events (F-R31, F-R33, F-R35), and the test for an `estop` line. Writes through a callback. Pure C |
 | `version.h` | Firmware version for `identify` |
-| `main.c` | Calls `board_safe_init()` first (F-R23), then sets up the step generators (which starts core 1) and runs core 0's main loop: TinyUSB, received bytes through the line assembler to the dispatcher, then `stepper_poll()` |
+| `main.c` | Calls `board_safe_init()` first (F-R23), then sets up the step generators (which starts core 1) and runs core 0's main loop: TinyUSB, received bytes through the line assembler into the line queue, one queued line to the dispatcher, then `stepper_poll()` |
 | `usb_descriptors.c`, `tusb_config.h` | TinyUSB used directly (not the SDK's `stdio_usb`), one CDC interface (F-R30). Development VID/PID `2E8A:000A`. The USB serial number is the flash unique ID, so `/dev/serial/by-id/` gives each board a stable path |
 
 Host-link details:
 - Frames are parsed with `cJSON_ParseWithOpts(..., require_null_terminated)`, so trailing non-whitespace makes a frame malformed (plain `cJSON_Parse` would ignore it). Trailing whitespace such as a terminal's `\r` is allowed. A line with an embedded NUL is malformed.
 - `seq` is read through `valuedouble` (exact for every uint32; `valueint` clamps at `INT_MAX`). Replies are printed into a fixed buffer with `cJSON_PrintPreallocated`.
-- The partial line is discarded on connect and disconnect (DTR edges). Unread bytes are flushed only on disconnect, since on connect the FIFO may already hold the host's first frame.
+- The partial line is discarded on connect and disconnect (DTR edges). Unread bytes and queued lines are dropped only on disconnect, since on connect the FIFO may already hold the host's first frame.
 - The pure-C modules are linked into the host unit tests (`tests/test_*.c`). `tests/hostlink.py` is a stdlib-only client for manual tests on the board. With `--wait`, it sends each frame only after the previous one's reply and the `move_end` of any move it started.
 
 Step generation details:
@@ -33,7 +34,7 @@ Step generation details:
 - A move is rejected with `bad_param` if the high time is under 1 us, or the low time would be under 1 us at this speed (F-R2), or if the target leaves the int32 position range. `steps: 0` is accepted before any of the timing checks, even at settings that would reject a real move. It queues nothing and marks the axis moving; the axis is already idle, so the next poll sends `move_start` and `move_end` together.
 - DIR (F-R4): `stepgen_set_dir()` waits 1 us after changing DIR, before any step is queued. DIR only changes while the axis is idle, and "idle" means the state machine is back at `top` with an empty FIFO, so the last step's low time (at least 1 us) has already run.
 - Finished moves are detected by `stepper_poll()` from that idle state, once core 1 has also handed over the move's last word. `move_start` is also sent from the poll, so it always follows the command's reply.
-- `move` doesn't check `not_configured` yet; that check comes with `settings_done` in step 6. ENABLE, SLEEP and RESET stay in their boot state, so a move pulses STEP and DIR with the driver still disabled.
+- `move` doesn't check `not_configured` yet; that check comes with `settings_done` in step 6. A move doesn't touch ENABLE: it pulses STEP and DIR whether or not the driver is enabled.
 
 Planner details (`planner.c`):
 - Periods follow Austin's recurrence (see Intended approach), with the 0.676 correction on the first period. That first period is about 32% shorter than the exact `sqrt(2n / a)` profile, and the second about 2%; from the third on, periods are within 0.75%. Absolute timing doesn't matter, so the shift this gives the profile is accepted.
@@ -48,6 +49,17 @@ Feeding (`stepgen.c`, core 1):
 - Each axis has one DMA channel, paced by its state machine's TX FIFO, and two 64-word buffers. The DMA completion interrupt (`DMA_IRQ_1`, on core 1) starts the next buffer if it is ready, and core 1's main loop refills the drained one. If the next buffer isn't ready yet, the main loop starts it as soon as it is.
 - The two DMA channels aren't chained to each other: a late refill would then replay a stale buffer as extra steps. With one channel per axis, a late refill only pauses the state machine, and the pause is reported.
 - Underruns (F-R3): the PIO's sticky TX-stall flag is read each time DMA resumes during a move; a set flag means the state machine ran out of words since the last resume, so a step came out late. The stall at `top` while idle is cleared once a new move's first words are in the FIFO. Each underrun is counted, and `stepper_poll()` sends one `fault` event (`code: step_underrun`) per change in the count. The move goes on: no step is lost, so the position stays exact.
+
+Stop and emergency stop (F-R1, F-R21, F-R24):
+- The emitted step count comes from a step counter: a second PIO program (`stepcount`, on PIO1, one state machine per stepper) counts rising edges on the STEP pin's input. It counts what reached the pin, whatever words were queued; a repeat word's remaining count can't be read back from the step generator. The CPU reads the counter with `mov isr, x` and `push` executed on its state machine.
+- `stepgen_stop()` (core 0) halts the step generator's state machine at once, so no step starts after it. If STEP is high at that moment, it is held high for the full high time and then driven low, so the driver takes the step the counter has already counted. The cut is thus within 1 step.
+- Core 0 then asks core 1 to drop the move (a `stop_req` flag); core 1 aborts the DMA channel (with its interrupt masked, as the SDK advises for RP2040-E13) and forgets the buffers. Core 0 clears the FIFO by toggling the TX join (`pio_sm_clear_fifos()` toggles the RX join, which would briefly join both), restarts the state machine at `top`, and reloads its high delay, which the restart clears.
+- `stop` replies with the new `pos`, then `move_end` (`reason: stop`) follows from the poll. The axis counts as moving until that `move_end` is out, so a `move` in between gets `busy`. A move of 0 steps can be stopped too, with nothing to halt.
+- `estop` halts every moving axis the same way (`reason: estop`) and disables every driver. A `stop` already pending keeps its reason. Nothing is latched: after `set_enable 1`, moves work again.
+- Ahead of queued messages (F-R24): received bytes are assembled into lines as soon as they arrive, while the 8-slot line queue has room; an `estop` line runs the moment it is complete, ahead of every line still queued. Other lines (and over-length markers, so `rx_error` keeps its place) are queued and dispatched one per pass of the main loop, so `stepper_poll()` sends pending events between commands. A line is spotted as `estop` by a substring test, then a parse; an `estop` without a valid `seq` is still dropped with `no_seq`.
+  - Limits: see Known gaps.
+
+Driver enable (F-R10): `set_enable 1` first wakes the driver if SLEEP or RESET is low: RESET and SLEEP high, then 1 ms (the A4988's wake-up time before stepping), then ENABLE low. `set_enable 0` and `estop` only drive ENABLE high; SLEEP and RESET stay high from then on.
 
 Safe state at boot: STEP low and ENABLE high (F-R23). F-R23 doesn't specify the other driver pins; they are driven low, which holds the A4988 asleep (SLEEP) and in reset (RESET), with DIR low and full-step microstepping (MS1–MS3 low).
 
@@ -73,15 +85,20 @@ Safe state at boot: STEP low and ENABLE high (F-R23). F-R23 doesn't specify the 
   - Speeds are in full steps/s, so the planner scales by the microstep setting to get the pulse rate.
   - The planner is pure C with no SDK dependency, so it compiles on the host and is unit-tested there against the exact formula `t[n] = sqrt(2n / a)`.
 - FIFO underrun (F-R3): if core 1 ever misses a chunk refill, the PIO stalls and that step comes out late. The firmware checks the PIO's latched TX-stall flag each time DMA resumes during a move, and reports any stall as a `fault` event (`code: step_underrun`), so a late step is never silent.
-- Stop (F-R1, F-R21): up to 4 periods (8 with joined FIFOs) can be queued. `stop` aborts the DMA channel, clears the TX FIFO and halts the state machine, which keeps the cut within 2 steps. The emitted count comes from the DMA's remaining transfer count, minus words left unconsumed in the FIFO, corrected for a step that was in progress, so the reported position stays exact.
+- Stop (F-R1, F-R21): `stop` halts the state machine, aborts the DMA channel and clears the TX FIFO, which keeps the cut within 2 steps. The emitted count comes from a step counter on the STEP pin (see Stop and emergency stop above), so the reported position stays exact; working it out from the DMA's remaining transfer count fails during cruise, where one repeat word stands for many steps.
 - Endstop (F-R20): the step PIO program checks the endstop pin (`jmp pin`) before every step and halts itself when it is active, so the axis stops within 1 step with no CPU involvement.
   - The check applies only to moves toward the endstop; moves away from it (e.g. leaving the switch after homing) ignore it. The planner marks this per move.
   - On halting, the PIO raises an IRQ. Core 1 then aborts the DMA, works out the exact emitted count as for `stop`, and core 0 sends the `endstop` and `move_end` (`reason: endstop`) events as before (F-R32).
   - Endstop changes while the axis is idle are still reported, through a GPIO interrupt that only reports and never stops anything.
-- Emergency stop (F-R24): handled in the USB receive path, before the command queue.
+- Emergency stop (F-R24): handled in the USB receive path, before the line queue (see above).
 - PWM and servo (F-R7, F-R41): RP2040 hardware PWM slices.
 - HX711 (F-R43): a PIO program, so reading never competes with step timing.
 
 ## Known gaps
 
-All of it.
+All of it beyond build plan step 5. Limitations of what is built:
+
+- **PIO state machines.** Each stepper takes one PIO0 state machine (step generator) and one PIO1 state machine (step counter). With 4 steppers PIO1 is full, which leaves none for the HX711 reader (build plan step 17). This board has one stepper.
+- **`estop` and unread input (F-R24).** `estop` overtakes only the lines already read from USB. With the 8-slot line queue full, nothing more is read until one queued line is dispatched, so an `estop` behind them waits for that. While a reply is blocked on a full USB TX buffer (a host that doesn't read), no input is read at all.
+- **Underrun reports (F-R3)** are covered by host tests only; they have never been triggered on hardware, since the board doesn't fall behind in normal operation.
+- **Position with microstepping.** Positions are whole full steps, so a move stopped part-way through a full step (microsteps > 1) is reported rounded towards its start. Microsteps stay at 1 until build plan step 6, where this needs deciding.
