@@ -31,6 +31,7 @@ static void test_full(void)
                  "device = /dev/x\n"
                  "socket = /tmp/s.sock\n"
                  "group = g\n"
+                 "lease_timeout_ms = 2000\n"
                  "[link]\n"
                  "report_period = 0\n"
                  "timeout_ms = 1000   ; inline comment\n"
@@ -48,6 +49,7 @@ static void test_full(void)
     assert(strcmp(cfg.device, "/dev/x") == 0);
     assert(strcmp(cfg.socket, "/tmp/s.sock") == 0);
     assert(strcmp(cfg.group, "g") == 0);
+    assert(cfg.lease_timeout_ms == 2000);
     assert(cfg.report_period == 0);
     assert(cfg.timeout_ms == 1000);
     assert(cfg.reply_timeout_ms == 200);
@@ -68,6 +70,7 @@ static void test_defaults(void)
     assert(parse("[daemon]\ndevice = /dev/x\n") == 0);
     assert(strcmp(cfg.socket, "/run/nimhubd/control.sock") == 0);
     assert(strcmp(cfg.group, "stepper") == 0);
+    assert(cfg.lease_timeout_ms == 5000);
     assert(cfg.report_period == 250);
     assert(cfg.timeout_ms == 0);
     assert(cfg.reply_timeout_ms == 500);
@@ -102,6 +105,7 @@ static void test_errors(void)
         "[link]\nretries = 3\n",
         "[daemon]\nport = 3\n",
         "[daemon]\ngroup = \n",
+        "[daemon]\nlease_timeout_ms = 0\n",
         "[m0\nspeed = 1\n",                 // syntax
         "[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]\n",   // oid too long
     };

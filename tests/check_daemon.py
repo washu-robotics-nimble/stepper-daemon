@@ -121,6 +121,7 @@ INI = """\
 [daemon]
 device = {tty}
 socket = {socket}
+{daemon}
 
 [link]
 report_period = 100
@@ -153,11 +154,12 @@ class Bench:
         self.socket = os.path.join(self.tmp.name, "control.sock")
         self.n = 0
 
-    def ini(self, m0=M0, tty=None, socket=None):
+    def ini(self, m0=M0, tty=None, socket=None, daemon=""):
         self.n += 1
         path = os.path.join(self.tmp.name, f"test{self.n}.ini")
         with open(path, "w") as f:
-            f.write(INI.format(tty=tty or self.tty, socket=socket or self.socket, m0=m0))
+            f.write(INI.format(tty=tty or self.tty, socket=socket or self.socket, m0=m0,
+                               daemon=daemon))
         return path
 
     def daemon(self, ini, debug=True):
@@ -405,7 +407,9 @@ M0_FREE = "microsteps = 4\nspeed = 300\naccel = 1000\npulse_width_us = 10\n"
 
 def client_checks(b):
     dummy = Dummy(b.tty, "--objects", "m0:stepper,m1:stepper")
-    d = b.daemon(b.ini(m0=M0_FREE))
+    # A long lease: this session holds it for longer than the default 5 s,
+    # and only lease and renew renew it (D-R18)
+    d = b.daemon(b.ini(m0=M0_FREE, daemon="lease_timeout_ms = 60000"))
     clients = []
     try:
         ok = d.wait_for("handshake: done") is not None
@@ -434,6 +438,17 @@ def client_checks(b):
               and p.get("pos_valid") is False and "moving" not in p, str(p))
         n_get_state = sum(f.get("cmd") == "get_state" for f in dummy.received())
         check("status and pos don't ask the MCU", n_get_state == 2)
+
+        # The lease (D-R18): a write needs it
+        r = c.call("rel", "m0", steps=400)
+        check("write without the lease: lease_held, nothing sent",
+              err(r, "lease_held") and dummy.received()[-1].get("cmd") != "move", str(r))
+        r = c.call("lease")
+        check("lease: taken, with timeout_ms", acked(r) and r.get("timeout_ms") == 60000, str(r))
+        r = c.call("lease")
+        check("lease again by the holder: renewed", acked(r), str(r))
+        r = c.call("renew")
+        check("renew by the holder", acked(r) and r.get("timeout_ms") == 60000, str(r))
 
         # A move, end to end
         r = c.call("rel", "m0", steps=400)
@@ -474,9 +489,10 @@ def client_checks(b):
             ("unknown command: unknown_cmd", c.call("fly", "m0"), "unknown_cmd"),
             ("device command without dev: unknown_cmd", c.call("rel", steps=1), "unknown_cmd"),
             ("daemon command with dev: unknown_cmd", c.call("estop", "m0"), "unknown_cmd"),
-            ("speed: not_impl", c.call("speed", "m0", value=100), "not_impl"),
-            ("lease: not_impl", c.call("lease"), "not_impl"),
+            ("home: not_impl", c.call("home", "m0"), "not_impl"),
             ("watch: not_impl", c.call("watch"), "not_impl"),
+            ("speed 'x': bad_param", c.call("speed", "m0", value="x"), "bad_param"),
+            ("speed without value: bad_param", c.call("speed", "m0"), "bad_param"),
             ("rel steps 'x': bad_param", c.call("rel", "m0", steps="x"), "bad_param"),
             ("rel steps 1.5: bad_param", c.call("rel", "m0", steps=1.5), "bad_param"),
             ("rel steps 2^31: bad_param", c.call("rel", "m0", steps=2**31), "bad_param"),
@@ -508,24 +524,72 @@ def client_checks(b):
         r = c.receive()
         check("seq 2^32 - 1 is echoed", acked(r) and r.get("seq") == 4294967295, str(r))
 
-        # Several clients (D-R10), at most 8
+        # The runtime settings (D-R3): one set_motion field each
+        for cmd, field, value in [("speed", "speed", 400), ("accel", "accel", 2000),
+                                  ("micro", "microsteps", 8)]:
+            r = c.call(cmd, "m0", value=value)
+            f = dummy.received()[-1]
+            check(f"{cmd} {value}: accepted, sent as set_motion {field}", acked(r)
+                  and f == {"seq": f.get("seq"), "cmd": "set_motion", "oid": "m0", field: value},
+                  f"{r} {f}")
+        r = c.call("micro", "m0", value=3)
+        check("micro 3: the MCU's bad_param", err(r, "bad_param"), str(r))
+        c.call("rel", "m0", steps=2000)
+        r = c.call("speed", "m0", value=300)
+        check("speed while moving: the MCU's busy", err(r, "busy"), str(r))
+        c.call("stop", "m0")
+        c.wait_idle()
+
+        # zero, lock, unlock
+        r = c.call("zero", "m0")
+        st = c.call("status", "m0")
+        check("zero: pos 0, valid", acked(r) and st.get("pos") == 0 and st.get("pos_valid") is True,
+              f"{r} {st}")
+        r = c.call("abs", "m0", pos=50)
+        st = c.wait_idle()
+        check("abs 50 after zero: ends at 50", acked(r) and st is not None and st.get("pos") == 50,
+              f"{r} {st}")
+        r = c.call("lock", "m0")
+        st = c.call("status", "m0")
+        check("lock: locked, still valid", acked(r) and st.get("locked") is True
+              and st.get("pos_valid") is True, f"{r} {st}")
+        r = c.call("unlock", "m0")
+        st = c.call("status", "m0")
+        check("unlock: free, position void", acked(r) and st.get("locked") is False
+              and st.get("pos_valid") is False, f"{r} {st}")
+        frames = [f for f in dummy.received() if f.get("cmd") in ("set_position", "set_enable")]
+        check("zero, lock, unlock are sent as set_position 0, set_enable 1 and 0",
+              [(f["cmd"], f.get("pos", f.get("value"))) for f in frames[-3:]]
+              == [("set_position", 0), ("set_enable", 1), ("set_enable", 0)], str(frames[-3:]))
+
+        # Several clients (D-R10), at most 8; one lease (D-R18)
         c2 = Client(b.socket)
         clients.append(c2)
+        check("another client can't take the lease", err(c2.call("lease"), "lease_held"))
+        check("...or renew it", err(c2.call("renew"), "lease_held"))
+        r = c2.call("release")
+        check("...and its release does nothing", acked(r) and acked(c.call("renew")), str(r))
         c.call("rel", "m0", steps=400)
         st = c2.call("status", "m0")
         check("a second client sees the first one's move", acked(st) and st.get("moving"), str(st))
         r = c2.call("stop", "m0")
-        check("...and can stop it (no lease yet)", acked(r), str(r))
-        c2.wait_idle()
+        check("...but can't stop it without the lease (stop is a write)",
+              err(r, "lease_held") and r.get("msg") == "lease held by another client", str(r))
+        c.call("stop", "m0")
+        c.wait_idle()
         more = [Client(b.socket) for _ in range(6)]
         clients.extend(more)
         check("8 clients at once", all(acked(m.call("pos", "m0")) for m in more))
         ninth = Client(b.socket)
         clients.append(ninth)
         check("a 9th client is closed at once", ninth.receive(1.0) == "eof")
+        r = c.call("release")
+        check("release: the lease is free for others", acked(r) and acked(c2.call("lease"))
+              and acked(c2.call("release")), str(r))
 
-        # A client that goes away with a request pending
+        # A client that goes away with a request pending: the lease goes with it
         gone = more[1]
+        check("a client takes the lease", acked(gone.call("lease")))
         gone.seq += 1
         gone.send_raw(json.dumps({"seq": gone.seq, "cmd": "rel", "dev": "m0",
                                   "steps": 100}).encode() + b"\n")
@@ -533,27 +597,32 @@ def client_checks(b):
         clients.remove(gone)
         time.sleep(0.2)
         st = c.wait_idle()
-        check("a client gone with a request pending: nimhubd carries on",
+        check("...goes with a request pending: nimhubd carries on",
               d.p.poll() is None and st is not None, str(st))
+        check("...and its lease is freed at once (D-R18)", acked(c.call("lease"))
+              and acked(c.call("release")))
 
         # A client that shuts down its sending side, as socat does at the end
         # of its input, still gets every reply (D-R41), then EOF
         half = more[2]
-        half.send_raw(b'{"seq":1,"cmd":"rel","dev":"m0","steps":100}\n'
-                      b'{"seq":2,"cmd":"status","dev":"m0"}\n'
-                      b'{"seq":3,"cmd":"stop","dev":"m0"}\n')
+        half.send_raw(b'{"seq":1,"cmd":"lease"}\n'
+                      b'{"seq":2,"cmd":"rel","dev":"m0","steps":100}\n'
+                      b'{"seq":3,"cmd":"status","dev":"m0"}\n'
+                      b'{"seq":4,"cmd":"stop","dev":"m0"}\n')
         half.s.shutdown(socket.SHUT_WR)
-        got = [half.receive() for _ in range(4)]
-        seqs = [m.get("seq") for m in got[:3] if isinstance(m, dict)]
+        got = [half.receive() for _ in range(5)]
+        replies = {m.get("seq"): m for m in got[:4] if isinstance(m, dict)}
         check("half-closed client: all replies, then EOF",
-              sorted(seqs) == [1, 2, 3] and got[3] == "eof", str(got))
+              sorted(replies) == [1, 2, 3, 4] and acked(replies.get(2)) and got[4] == "eof",
+              str(got))
         c.wait_idle()
 
-        # estop: a daemon command (F-R24)
+        # estop: emergency class, from any client (D-R17, F-R24)
+        check("the lease again", acked(c.call("lease")))
         c.call("rel", "m0", steps=5000)
         time.sleep(0.2)
-        r = c.call("estop")
-        check("estop: accepted", acked(r), str(r))
+        r = c2.call("estop")
+        check("estop from a client without the lease: accepted", acked(r), str(r))
         st = c.call("status", "m0")
         check("after estop: position void, driver disabled",
               acked(st) and st.get("pos_valid") is False and st.get("locked") is False, str(st))
@@ -576,6 +645,7 @@ def client_checks(b):
     d = b.daemon(b.ini(m0=M0_FREE))
     d.wait_for("handshake: done")
     c = Client(b.socket)
+    c.call("lease")
     r = c.call("abs", "m0", pos=-100)
     check("abs -100 with the position valid: accepted, sent as move_to", acked(r)
           and dummy.received()[-1].get("cmd") == "move_to", str(r))
@@ -591,6 +661,7 @@ def client_checks(b):
     d = b.daemon(b.ini(m0="soft_limit_max = 5000"))
     d.wait_for("handshake: done")
     c = Client(b.socket)
+    c.call("lease")
     r = c.call("rel", "m0", steps=10)
     check("rel with soft limits and an invalid position: pos_invalid", err(r, "pos_invalid"), str(r))
     c.close()
@@ -602,9 +673,42 @@ def client_checks(b):
     d = b.daemon(b.ini(m0=M0_FREE))
     d.wait_for("handshake: done")
     c = Client(b.socket)
+    c.call("lease")
     r = c.call("rel", "m0", steps=10)
     check("no reply from the MCU: link_down reply", err(r, "link_down"), str(r))
     c.close()
+    d.stop()
+    dummy.stop()
+
+    # Lease expiry (D-R18), with a short timeout
+    dummy = Dummy(b.tty)
+    d = b.daemon(b.ini(m0=M0_FREE, daemon="lease_timeout_ms = 400"))
+    d.wait_for("handshake: done")
+    c, c2 = Client(b.socket), Client(b.socket)
+    r = c.call("lease")
+    check("lease_timeout_ms from the INI", acked(r) and r.get("timeout_ms") == 400, str(r))
+    time.sleep(0.25)
+    check("a write while held", acked(c.call("rel", "m0", steps=1)))
+    c.call("status", "m0")
+    time.sleep(0.25)
+    check("writes and reads don't renew it: expired at 400 ms, lease_held",
+          err(c.call("rel", "m0", steps=1), "lease_held"))
+    check("...and renew too", err(c.call("renew"), "lease_held"))
+    check("...and another client can take it", acked(c2.call("lease")))
+    time.sleep(0.25)
+    check("renew keeps it", acked(c2.call("renew")))
+    time.sleep(0.25)
+    check("...past the first timeout", acked(c2.call("rel", "m0", steps=1)))
+    c2.wait_idle()
+    check("...and lease by the holder renews it too", acked(c2.call("lease")))
+    c2.call("rel", "m0", steps=3000)
+    time.sleep(0.6)
+    st = c.call("status", "m0")
+    check("a move goes on after its lease expires", acked(st) and st.get("moving") is True, str(st))
+    check("...and the lease is free", acked(c.call("lease")))
+    c.call("stop", "m0")
+    c.close()
+    c2.close()
     d.stop()
     dummy.stop()
 

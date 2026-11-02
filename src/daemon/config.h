@@ -49,6 +49,7 @@ typedef struct {
     char device[256];       // the MCU's serial device
     char socket[108];       // client socket (D-R12); sun_path is 108 bytes
     char group[64];
+    int32_t lease_timeout_ms;   // D-R18
     // [link]
     int32_t report_period;      // F-R32, ms; 0 = off
     int32_t timeout_ms;         // F-R22, the firmware's; 0 = off

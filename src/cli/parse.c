@@ -17,6 +17,22 @@ const char *const cli_motor_commands[] = {
     "zero", "home", "lock", "unlock", NULL,
 };
 
+// The write commands (D-R13, docs/daemon/spec.md), which need the lease
+static const char *const write_commands[] = {
+    "rel", "abs", "stop", "speed", "accel", "micro", "zero", "home", "lock", "unlock", NULL,
+};
+
+bool cli_is_write(const cJSON *req)
+{
+    const cJSON *cmd = cJSON_GetObjectItemCaseSensitive(req, "cmd");
+    if (!cJSON_IsString(cmd) || cJSON_GetObjectItemCaseSensitive(req, "dev") == NULL)
+        return false;
+    for (const char *const *w = write_commands; *w != NULL; w++)
+        if (strcmp(*w, cmd->valuestring) == 0)
+            return true;
+    return false;
+}
+
 // The argument field of each device command that takes one; any other
 // command's argument goes into "value"
 static const struct {
@@ -61,7 +77,7 @@ cli_kind_t cli_parse(const char *line, cJSON **req, char *err, size_t errlen)
             return CLI_ERROR;
         }
         *req = obj;
-        return CLI_REQUEST;
+        return CLI_RAW;
     }
 
     // Split into words
@@ -113,10 +129,18 @@ const char *cli_help(void)
            "  <dev> stop            stop the move; the reply has where it ends\n"
            "  <dev> pos             position\n"
            "  <dev> status          position, moving, locked\n"
-           "  <dev> speed|accel|micro <value>, zero, home, lock, unlock  (to come)\n"
+           "  <dev> speed <value>   full steps/s\n"
+           "  <dev> accel <value>   full steps/s^2\n"
+           "  <dev> micro <value>   microsteps: 1, 2, 4, 8, 16\n"
+           "  <dev> zero            set the position to 0 (makes it valid)\n"
+           "  <dev> lock|unlock     enable / disable the driver (unlock voids the position)\n"
            "  devices               list the devices\n"
            "  estop                 emergency stop: every axis, drivers disabled\n"
-           "  {...}                 a raw JSON request; seq is added if missing\n"
+           "  lease / release       hold the lease across commands (renewed in the\n"
+           "                        background); otherwise each write command takes\n"
+           "                        it and releases it by itself\n"
+           "  {...}                 a raw JSON request, sent as it is (no automatic\n"
+           "                        lease); seq is added if missing\n"
            "  help                  this help\n"
            "  quit                  leave (also Ctrl-D, or Ctrl-C on an empty line)\n"
            "Replies are shown as nimhubd sends them.\n";

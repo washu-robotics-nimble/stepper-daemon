@@ -26,6 +26,10 @@ typedef struct {
 // for an over-length line, which was dropped
 typedef void (*server_line_fn)(void *ctx, server_client_t client, char *line, size_t len);
 
+// A client is gone (disconnected or dropped); called just before its slot is
+// freed
+typedef void (*server_close_fn)(void *ctx, server_client_t client);
+
 typedef struct {
     int fd;                     // -1: free slot
     uint32_t gen;               // changes with every new client in the slot
@@ -45,6 +49,7 @@ typedef struct {
     char path[108];
     unsigned next_id;
     server_line_fn on_line;
+    server_close_fn on_close;
     void *ctx;
     int poll_map[SERVER_MAX_CLIENTS];   // pollfd order -> slot, from server_poll_fill()
     size_t poll_count;
@@ -57,7 +62,7 @@ typedef struct {
 // runs (D-R1). The directory isn't created; systemd creates it (D-R12).
 // Returns 0, or -1 (logged).
 int server_open(server_t *s, const char *path, const char *group,
-                server_line_fn on_line, void *ctx);
+                server_line_fn on_line, server_close_fn on_close, void *ctx);
 
 // Close every client and the socket, and remove the socket file
 void server_close(server_t *s);

@@ -91,7 +91,11 @@ static void daemon_key(parse_t *p, const char *name, const char *value, int line
         ok = copy_string(cfg->socket, sizeof cfg->socket, value);
     else if (strcmp(name, "group") == 0)
         ok = copy_string(cfg->group, sizeof cfg->group, value);
-    else {
+    else if (strcmp(name, "lease_timeout_ms") == 0) {
+        if (!parse_int32(value, 1, INT32_MAX, &cfg->lease_timeout_ms))
+            parse_error(p, line, "[daemon]: bad value '%s' for '%s'", value, name);
+        return;
+    } else {
         parse_error(p, line, "[daemon]: unknown key '%s'", name);
         return;
     }
@@ -206,6 +210,7 @@ static void set_defaults(config_t *cfg)
     memset(cfg, 0, sizeof *cfg);
     strcpy(cfg->socket, "/run/nimhubd/control.sock");   // D-R12
     strcpy(cfg->group, "stepper");
+    cfg->lease_timeout_ms = 5000;   // D-R18
     cfg->report_period = 250;       // the firmware's defaults (F-R32, F-R22)
     cfg->timeout_ms = 0;
     cfg->reply_timeout_ms = 500;    // D-R30

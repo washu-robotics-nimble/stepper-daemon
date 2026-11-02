@@ -23,7 +23,7 @@ Dependencies are vendored in `lib/`: inih, cJSON v1.7.19, and rxi/log.c (`lib/lo
 
 Config (`config.c`):
 - Default path `/etc/nimhubd/nimhub.ini`. If it doesn't exist, `$XDG_CONFIG_HOME/nimhubd/nimhub.ini` (`$XDG_CONFIG_HOME` defaults to `~/.config`) is used instead, for testing without write access to `/etc`. The sample is `nimhub.ini` at the top of the repository (`motor.ini` until 2026-11-02).
-- `[daemon]`: `device` (required), `socket` (default `/run/nimhubd/control.sock`, D-R12), `group` (default `stepper`); the last two are used from step 9.
+- `[daemon]`: `device` (required), `socket` (default `/run/nimhubd/control.sock`, D-R12), `group` (default `stepper`); the last two are used from step 9. Since step 11 also `lease_timeout_ms` (default 5000, D-R18).
 - `[link]`: `report_period` (default 250, F-R32), `timeout_ms` (the firmware's F-R22 timeout, default 0 = off), `reply_timeout_ms` (D-R30, default 500). `report_period` and `timeout_ms` are always sent, so none is left over from an earlier session.
 - Device sections: the key names are the `set_motion` fields: `microsteps`, `speed`, `accel`, `pulse_width_us`, `dir_polarity`, `soft_limit_min`, `soft_limit_max`, plus `endstop` (D-R44), which stays in the daemon. `default_speed` and `max_accel` were renamed to `speed` and `accel`, and `accel` must be at least 1 (there is no "0 = no ramp" any more).
 - Every value is checked when the file is loaded, against the firmware's ranges; an unknown key, a key set twice, or `soft_limit_min` above `soft_limit_max` is an error too. Every error is logged with its line, and the daemon doesn't start.
@@ -70,8 +70,8 @@ Socket (`server.c`):
 
 Commands (`commands.c`):
 - The envelope: a line that isn't a JSON object, or has no `seq` that is an integer in uint32 range, gets a `bad_request` event (also for an over-length line, or one with a NUL byte). With a `seq` but no string `cmd`, or a `dev` that isn't a string, the reply is `bad_request`.
-- Without `dev`: daemon commands (`estop`; `devices` since step 10, `link_down` until the handshake is done; `lease`, `renew`, `release`, `watch`, `unwatch` are `not_impl`). A device command without `dev` is `unknown_cmd`. `estop` goes to the firmware whenever the link is up, even during the handshake.
-- With `dev`: `link_down` until the handshake is done; then `unknown_dev` for an `oid` the firmware didn't list, and `unknown_cmd` for a command its type doesn't have. Motor: `rel` → `move`, `abs` → `move_to`, `stop` → `stop`; `pos` and `status` come from the model. `speed`, `accel`, `micro`, `zero`, `home`, `lock` and `unlock` are `not_impl`.
+- Without `dev`: daemon commands (`estop`; `devices` since step 10, `link_down` until the handshake is done; `lease`, `renew`, `release`, `watch`, `unwatch` are `not_impl`; the lease commands work since step 11). A device command without `dev` is `unknown_cmd`. `estop` goes to the firmware whenever the link is up, even during the handshake.
+- With `dev`: `link_down` until the handshake is done; then `unknown_dev` for an `oid` the firmware didn't list, and `unknown_cmd` for a command its type doesn't have. Motor: `rel` → `move`, `abs` → `move_to`, `stop` → `stop`; `pos` and `status` come from the model. `speed`, `accel`, `micro`, `zero`, `home`, `lock` and `unlock` are `not_impl` (all but `home` work since step 11).
 - `abs` with the position invalid is `pos_invalid`, without asking the firmware: the firmware checks that only when soft limits are set (F-R25).
 - A command that goes to the firmware replies from the firmware's reply. Its errors keep their code (`busy`, `bad_param`, `pos_invalid`, `not_moving`), except `unknown_oid` → `unknown_dev` and `not_configured` → `link_down`. If the link goes down first, the reply is `link_down`: the link layer then calls every waiting request's callback with no reply.
 
@@ -128,15 +128,46 @@ Tests:
 - `tests/test_cli_parse.c` (part of `make test`) checks the parser.
 - `tests/check_cli.py` (also run by `make check-daemon`) runs nimhub-cli through nimhubd and the dummy: one-shot and stdin mode, and a short interactive session on a pty (bar, a move, tab completion, quitting). How the bar looks is checked by hand.
 
+Build plan step 11 (2026-11-02): the lease, the command classes, and the motor commands `speed`, `accel`, `micro`, `zero`, `lock` and `unlock`. `home` stays `not_impl` (step 16), as do `watch` and `unwatch` (step 12).
+
+| File | Role |
+|---|---|
+| `lease.c` / `.h` (daemon) | The lease arbiter (D-R13, D-R16–D-R18): one lease, its expiry, and the check of each command's class. Pure C, with the time passed in |
+
+Lease (`lease.c`, `commands.c`):
+- Every command in `commands.c`'s tables has its class from the spec. Before a command runs, `lease_check()` lets read, session and emergency commands through, and a write only from the holder. Only `lease` and `renew` renew the lease; writes don't, as the spec says (D-R18). Otherwise the reply is `lease_held`, with `msg` saying whether another client holds the lease or nobody does.
+- The order of the checks: the envelope, `link_down`, `unknown_dev`, `unknown_cmd`, then the lease, then `not_impl` and the command's own checks.
+- Clients are keyed by their server slot and its generation, so a new connection in the same slot is a different client. The server tells `commands.c` when a client goes (`server_close_fn`), and its lease is freed then.
+- Expiry is checked when the lease is next used; nothing runs on a timer. A move started under an expired lease goes on.
+- `stop` is a write command, as the spec says: a client without the lease can't stop another client's move; `estop` can.
+
+Motor commands (`commands.c`):
+- `speed`, `accel` and `micro` take an int32 `value` and send one `set_motion` field (`speed`, `accel`, `microsteps`). The firmware checks the range and the combination (F-R2), and refuses while moving (`busy`).
+- An accepted value is kept in the model (`model_set_setting()`), for step 13 to re-send after a reconnect instead of the INI's (D-R3). `handshake_start()` resets the model, so step 13 has to keep those values across it.
+- `zero` sends `set_position 0`; the model's position becomes 0 and valid.
+- `lock` / `unlock` send `set_enable 1` / `0`; the model follows, and `unlock` voids the position, as the firmware does.
+
+nimhub-cli (`main.c`, `parse.c`):
+- A typed write command (`cli_is_write()`, a copy of the spec's write class) is wrapped in the lease: `lease`, then the write, then `release`. Only the write's reply is printed. If the lease is held by another client, the `lease_held` reply is printed instead, and nothing is sent.
+- Raw JSON goes out as it is, with no lease around it.
+- Typing `lease` keeps the lease: writes then go out without the wrapping, and in interactive mode the lease is renewed in the background at half its `timeout_ms`, and shown in the bar (`lease: yours`), until `release`. In stdin mode there is no background loop, so the CLI sends `renew` before the next command once half the timeout has passed; a long pause between lines can still let the lease expire.
+- If a renewal fails, the CLI says the lease is lost.
+
+Tests:
+- `tests/test_daemon_lease.c` (part of `make test`) checks taking, renewing, expiry, release, disconnect and each class.
+- `tests/check_daemon.py` adds checks for writes without the lease, two clients and one lease, release on disconnect, expiry with a short `lease_timeout_ms` (writes and reads don't renew it; `lease` and `renew` do), a move outliving its lease, `estop` without the lease, and the new motor commands.
+- `tests/check_cli.py` adds the automatic lease, a write refused while another client holds the lease, the user's own lease in stdin mode (renewed before commands when lines come slower than the lease), and its background renewal in interactive mode.
+- `tests/test_cli_parse.c` checks the write classification.
+
 | Module | Role today | Fate in the new architecture |
 |---|---|---|
 | `src/main.c` | Loads config, starts the motor thread, runs the CLI in-process | Becomes the daemon entry point: daemonise, open link, serve clients. Superseded by `src/daemon/main.c` (step 8), which runs in the foreground (systemd, step 14) |
 | `src/config.c` | INI loading (inih) | Kept, but the INI schema is redone: one section per device, named by its `oid`, holding behavioural settings only (D-R3, D-R43). A stepper section keeps `microsteps`, `default_speed`, `max_accel`, `pulse_width_us`, `dir_polarity` (initial turning direction), `endstop` (installed or not, D-R44), and optional `soft_limit_min` / `soft_limit_max` (omitted = no limit, F-R25); a load cell section has `scale`, `offset` and `gain`. `[daemon]` holds the USB device and the socket path and group (D-R12); `[link]` holds `report_period` and `timeout_ms`. `chip` and `*_pin` move into the firmware's board table (F-R34); `feedback_pin` is dropped, as the firmware counts pulses exactly (F-R1). Superseded by `src/daemon/config.c` (step 8), where `default_speed` and `max_accel` became `speed` and `accel`, and `[link]` also has `reply_timeout_ms` |
 | `src/motor.h` | The `motor_*` API (`src/motor.c`, the lg GPIO + `lgTxPulse` motion thread, is removed) | Implemented by a link client that translates `motor_*` calls into host-link messages. The public `motor_*` API is the seam to preserve |
 | `src/ramp.c` | Removed | The firmware computes ramps itself (F-R5, `src/firmware/planner.c`) |
-| `src/command.c` | Parse and run text commands | Kept as the shared command layer for all clients (D-R11). Parses JSON requests instead of text lines (D-R40, D-R41), and gains each command's class (D-R13). `help` and `quit` move to the CLI. Superseded by `src/daemon/commands.c` (step 9); the command classes come with the lease (step 11) |
+| `src/command.c` | Parse and run text commands | Kept as the shared command layer for all clients (D-R11). Parses JSON requests instead of text lines (D-R40, D-R41), and gains each command's class (D-R13). `help` and `quit` move to the CLI. Superseded by `src/daemon/commands.c` (step 9); the command classes come with the lease (step 11), and are there since |
 | `src/status.c` | Snapshot and change tracking | Kept. Snapshots fill from firmware reports instead of local atomics (D-R20). The snapshot part is `src/daemon/model.c` since step 9; change tracking comes with `watch` (step 12) |
-| `src/cli.c` | stdin CLI with a status bar | Becomes the interactive CLI client, a separate program on the Unix socket (D-R12, D-R15). Translates typed lines into JSON requests; the user always names the device (D-R14). Acquires the lease just before a write command and releases it right after the reply (D-R18). Superseded by `src/cli/` (`nimhub-cli`, step 10); the lease handling comes with step 11 |
+| `src/cli.c` | stdin CLI with a status bar | Becomes the interactive CLI client, a separate program on the Unix socket (D-R12, D-R15). Translates typed lines into JSON requests; the user always names the device (D-R14). Acquires the lease just before a write command and releases it right after the reply (D-R18). Superseded by `src/cli/` (`nimhub-cli`, step 10), with the lease handling since step 11 |
 | `src/motordriver.c`, `lib/lg/` | Removed (lg PWM experiment; vendored lg) | - |
 
 
@@ -147,7 +178,7 @@ Not designed in detail yet. Expected pieces:
 - Link layer: JSON framing, `seq` matching, response timeout, and report decoding for the host link. Emergency stop skips the outgoing queue. Reconnects with exponential backoff (250 ms doubling to 2 s). Implements D-R1, D-R17, D-R30, D-R31. Since step 8: `src/daemon/link.c` and `serial.c`, without the estop queue jump (step 14) and reconnects (step 13).
 - Machine model: the latest firmware-reported state for each device. This is the only source for `status_capture` (D-R20, D-R22). Converts HX711 raw counts to mg with the INI `scale` and `offset`. Since step 9: `src/daemon/model.c`, steppers only.
 - Client server: a Unix socket listener feeding one dispatch path through `command.c`, plus `status` events to watching clients (D-R10–D-R12, D-R15, D-R19, D-R21, D-R40–D-R43). Since step 9: `src/daemon/server.c` and `commands.c`, without `watch` (step 12).
-- Lease arbiter: checks each command's class against the current lease, and handles expiry and disconnects (D-R13, D-R16–D-R18).
+- Lease arbiter: checks each command's class against the current lease, and handles expiry and disconnects (D-R13, D-R16–D-R18). Since step 11: `src/daemon/lease.c`.
 
 Dependencies: libc, inih, and cJSON (client protocol D-R40 and host link F-R31). Since step 8, also rxi/log.c.
 
@@ -160,7 +191,7 @@ Dependencies: libc, inih, and cJSON (client protocol D-R40 and host link F-R31).
 - SIGINT / SIGTERM close the link without stopping motion first (D-R2; step 14). The firmware stops it anyway, as a link loss (F-R22).
 - Exclusive use (D-R1): the `/proc` scan only sees the processes of nimhubd's own user unless it runs as root, and `TIOCEXCL` doesn't keep root out.
 - A key a device section leaves out keeps whatever the firmware has. If the firmware wasn't reset, that can be a value set by an earlier daemon session, not the board table's default.
-- No lease yet: every client may write (D-R13, D-R16–D-R18; step 11). Events don't reach clients yet (D-R21; step 12).
+- ~~No lease yet: every client may write (D-R13, D-R16–D-R18; step 11).~~ Done in step 11. Events don't reach clients yet (D-R21; step 12).
 - An event with `settings_applied` false (a firmware reset, D-R30) isn't acted on yet (step 13).
-- nimhub-cli doesn't handle the lease yet. With step 11, it takes the lease just before each write command and releases it after the reply, so users never handle it by hand (D-R18).
-- Without `zero` (step 11) there is no way to make a position valid through nimhubd, so `abs` only works after a valid position from an earlier session (e.g. one set with `tests/hostlink.py` before nimhubd started).
+- ~~nimhub-cli doesn't handle the lease yet.~~ Done in step 11.
+- ~~Without `zero` (step 11) there is no way to make a position valid through nimhubd, so `abs` only works after a valid position from an earlier session (e.g. one set with `tests/hostlink.py` before nimhubd started).~~ `zero` exists since step 11.

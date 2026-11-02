@@ -12,13 +12,14 @@
 #include "log.h"
 
 int server_open(server_t *s, const char *path, const char *group,
-                server_line_fn on_line, void *ctx)
+                server_line_fn on_line, server_close_fn on_close, void *ctx)
 {
     struct sockaddr_un addr = {.sun_family = AF_UNIX};
 
     memset(s, 0, sizeof *s);
     s->listen_fd = -1;
     s->on_line = on_line;
+    s->on_close = on_close;
     s->ctx = ctx;
     for (int i = 0; i < SERVER_MAX_CLIENTS; i++)
         s->conns[i].fd = -1;
@@ -74,6 +75,8 @@ int server_open(server_t *s, const char *path, const char *group,
 static void drop(server_t *s, server_conn_t *c, const char *why)
 {
     log_info("client %u: %s", c->id, why);
+    if (s->on_close != NULL)
+        s->on_close(s->ctx, (server_client_t){(int)(c - s->conns), c->gen});
     close(c->fd);
     c->fd = -1;
     c->gen++;

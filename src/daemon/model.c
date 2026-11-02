@@ -92,6 +92,25 @@ void model_estop(model_t *m)
     }
 }
 
+void model_set_setting(model_device_t *d, model_setting_t s, int32_t value)
+{
+    d->has_setting[s] = true;
+    d->setting[s] = value;
+}
+
+void model_zeroed(model_device_t *d)
+{
+    d->pos = 0;
+    d->pos_valid = true;
+}
+
+void model_enabled(model_device_t *d, bool enabled)
+{
+    d->locked = enabled;
+    if (!enabled)
+        d->pos_valid = false;
+}
+
 void model_link_down(model_t *m)
 {
     for (size_t i = 0; i < m->count; i++)

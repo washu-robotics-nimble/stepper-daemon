@@ -6,7 +6,7 @@ CFLAGS = -Wall -O2 -std=c11
 # values).
 DAEMON_SRC = src/daemon/main.c src/daemon/config.c src/daemon/serial.c \
              src/daemon/link.c src/daemon/handshake.c src/daemon/model.c \
-             src/daemon/server.c src/daemon/commands.c \
+             src/daemon/server.c src/daemon/commands.c src/daemon/lease.c \
              lib/inih/ini.c lib/cJSON/cJSON.c lib/log/log.c
 DAEMON_LIB = $(filter-out src/daemon/main.c, $(DAEMON_SRC))
 DAEMON_CFLAGS = $(CFLAGS) -D_GNU_SOURCE \

@@ -131,9 +131,10 @@ Questions are at the end; answer them as before.
 
 - Command classes, a single global lease with expiry (5 s), release on disconnect (D-R10, D-R13, D-R16–D-R18).
 - The CLI takes the lease just before a write and releases it right after.
+- Only `lease` and `renew` renew the lease, as the spec says; writes don't (decided 2026-11-02). `stop` stays a write command: to stop another client's move without the lease, use `estop`.
 - Remaining motor commands: `speed`, `accel`, `micro`, `zero`, `lock`, `unlock`.
 
-**Test:** host unit tests for the arbiter (expiry, disconnect, write vs read vs session vs emergency). Manually: two `socat` sessions, where the one without the lease gets `lease_held`, and `estop` works from either.
+**Test:** host unit tests for the arbiter (expiry, disconnect, write vs read vs session vs emergency). Manually: two `socat` sessions, where the one without the lease gets `lease_held`, and `estop` works from either. On 2026-11-02 this was a USB-only check on the Pico, with nimhub-cli and a second client.
 
 ### 12. Watch and status events
 

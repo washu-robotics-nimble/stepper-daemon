@@ -1,6 +1,7 @@
 #ifndef PARSE_H
 #define PARSE_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include "cJSON.h"
 
@@ -16,11 +17,15 @@ typedef enum {
     CLI_EMPTY,      // blank line
     CLI_HELP,
     CLI_QUIT,
-    CLI_REQUEST,    // *req is the request, without seq unless the raw JSON had one
+    CLI_REQUEST,    // *req is the request, without seq
+    CLI_RAW,        // *req is a raw JSON request, sent as it is (seq kept)
     CLI_ERROR,      // err says why
 } cli_kind_t;
 
 cli_kind_t cli_parse(const char *line, cJSON **req, char *err, size_t errlen);
+
+// A write command (D-R13), which needs the lease (D-R18)
+bool cli_is_write(const cJSON *req);
 
 const char *cli_help(void);
 

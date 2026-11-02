@@ -17,6 +17,14 @@
 
 #define MODEL_MAX_DEVICES 32
 
+// Settings clients can change at runtime (speed, accel, micro)
+typedef enum {
+    MODEL_SPEED,
+    MODEL_ACCEL,
+    MODEL_MICRO,
+    MODEL_SETTINGS,
+} model_setting_t;
+
 typedef struct {
     char oid[CONFIG_OID_MAX];
     char type[32];
@@ -26,6 +34,11 @@ typedef struct {
     bool pos_valid;
     bool moving;
     bool locked;            // driver enabled
+    // Settings changed by clients and accepted by the firmware. They are
+    // kept here so a reconnect re-sends them instead of the INI's (D-R3,
+    // step 13), and are lost when nimhubd stops.
+    bool has_setting[MODEL_SETTINGS];
+    int32_t setting[MODEL_SETTINGS];
 } model_device_t;
 
 typedef struct {
@@ -57,6 +70,16 @@ void model_move_accepted(model_device_t *d);
 
 // The MCU accepted estop (F-R24): every driver disabled, every position void
 void model_estop(model_t *m);
+
+// The MCU accepted a setting for d (set_motion)
+void model_set_setting(model_device_t *d, model_setting_t s, int32_t value);
+
+// The MCU accepted set_position 0 for d: the position is valid
+void model_zeroed(model_device_t *d);
+
+// The MCU accepted set_enable for d. Disabling voids the position, since
+// the motor can turn freely (firmware spec).
+void model_enabled(model_device_t *d, bool enabled);
 
 // The link is down (D-R30): every position void
 void model_link_down(model_t *m);

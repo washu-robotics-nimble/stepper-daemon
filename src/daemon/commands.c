@@ -6,8 +6,17 @@
 #include <string.h>
 #include "log.h"
 
-// A request waiting for the MCU's reply
-typedef enum { FW_MOVE, FW_STOP, FW_ESTOP } fw_kind_t;
+// A request waiting for the MCU's reply: what to do with the model once the
+// MCU has accepted it
+typedef enum {
+    FW_MOVE,            // move, move_to
+    FW_STOP,
+    FW_ESTOP,
+    FW_SET,             // set_motion with one setting (speed, accel, micro)
+    FW_ZERO,            // set_position 0
+    FW_LOCK,            // set_enable 1
+    FW_UNLOCK,          // set_enable 0
+} fw_kind_t;
 
 typedef struct {
     commands_t *c;
@@ -15,6 +24,8 @@ typedef struct {
     double seq;
     fw_kind_t kind;
     model_device_t *dev;        // NULL for estop
+    model_setting_t setting;    // FW_SET
+    int32_t value;              // FW_SET
 } fw_request_t;
 
 // The context of one client request
@@ -30,16 +41,33 @@ typedef void (*command_fn)(const request_t *r);
 
 typedef struct {
     const char *name;
+    command_class_t cls;        // D-R13
     command_fn fn;              // NULL: defined in the spec, not implemented yet
 } command_t;
 
 void commands_init(commands_t *c, link_t *link, model_t *model,
-                   const handshake_t *hs, server_t *server)
+                   const handshake_t *hs, server_t *server, uint32_t lease_timeout_ms)
 {
     c->link = link;
     c->model = model;
     c->hs = hs;
     c->server = server;
+    lease_init(&c->lease, lease_timeout_ms);
+}
+
+// A client as a lease key: never 0, and a new one for every connection
+static uint64_t lease_key(server_client_t client)
+{
+    return (uint64_t)(client.index + 1) << 32 | client.gen;
+}
+
+void commands_client_gone(void *ctx, server_client_t client)
+{
+    commands_t *c = ctx;
+    // Freed at once on disconnect (D-R18)
+    if (lease_holder(&c->lease, monotonic_ms()) == lease_key(client))
+        log_info("client %u: lease freed (disconnected)", server_client_id(c->server, client));
+    lease_release(&c->lease, lease_key(client));
 }
 
 // ---- Replies -----
@@ -124,6 +152,16 @@ static void on_fw_reply(void *ctx, const cJSON *reply)
         case FW_ESTOP:
             model_estop(c->model);
             break;
+        case FW_SET:
+            model_set_setting(f->dev, f->setting, f->value);
+            break;
+        case FW_ZERO:
+            model_zeroed(f->dev);
+            break;
+        case FW_LOCK:
+        case FW_UNLOCK:
+            model_enabled(f->dev, f->kind == FW_LOCK);
+            break;
         }
         send_reply(c, f->client, out);
     }
@@ -131,11 +169,13 @@ static void on_fw_reply(void *ctx, const cJSON *reply)
     free(f);
 }
 
-// Send req (and free it) for r; the client's reply comes from the MCU's
-static void forward(const request_t *r, cJSON *req, fw_kind_t kind)
+// Send req (and free it) for r; the client's reply comes from the MCU's.
+// setting and value are for FW_SET.
+static void forward_set(const request_t *r, cJSON *req, fw_kind_t kind,
+                        model_setting_t setting, int32_t value)
 {
     fw_request_t *f = malloc(sizeof *f);
-    *f = (fw_request_t){r->c, r->client, r->seq, kind, r->dev};
+    *f = (fw_request_t){r->c, r->client, r->seq, kind, r->dev, setting, value};
 
     // Released in on_fw_reply(), which link_request() may call before it
     // returns
@@ -147,6 +187,11 @@ static void forward(const request_t *r, cJSON *req, fw_kind_t kind)
         reply_error(r, "link_down", "cannot send to the MCU");
         server_release(r->c->server, r->client);
     }
+}
+
+static void forward(const request_t *r, cJSON *req, fw_kind_t kind)
+{
+    forward_set(r, req, kind, MODEL_SPEED, 0);
 }
 
 // An int32 argument, or false (with a bad_param reply sent)
@@ -217,20 +262,71 @@ static void cmd_status(const request_t *r)
     send_reply(r->c, r->client, reply);
 }
 
+// speed, accel, micro {value}: one set_motion field. The firmware checks the
+// value and the combination (F-R2), and refuses while moving (F-R10).
+static void set_motion(const request_t *r, const char *field, model_setting_t setting)
+{
+    int32_t value;
+    if (!get_int32(r, "value", &value))
+        return;
+    cJSON *req = link_new_request("set_motion", r->dev->oid);
+    cJSON_AddNumberToObject(req, field, value);
+    forward_set(r, req, FW_SET, setting, value);
+}
+
+static void cmd_speed(const request_t *r)
+{
+    set_motion(r, "speed", MODEL_SPEED);
+}
+
+static void cmd_accel(const request_t *r)
+{
+    set_motion(r, "accel", MODEL_ACCEL);
+}
+
+static void cmd_micro(const request_t *r)
+{
+    set_motion(r, "microsteps", MODEL_MICRO);
+}
+
+static void cmd_zero(const request_t *r)
+{
+    cJSON *req = link_new_request("set_position", r->dev->oid);
+    cJSON_AddNumberToObject(req, "pos", 0);
+    forward(r, req, FW_ZERO);
+}
+
+static void set_enable(const request_t *r, int value)
+{
+    cJSON *req = link_new_request("set_enable", r->dev->oid);
+    cJSON_AddNumberToObject(req, "value", value);
+    forward(r, req, value ? FW_LOCK : FW_UNLOCK);
+}
+
+static void cmd_lock(const request_t *r)
+{
+    set_enable(r, 1);
+}
+
+static void cmd_unlock(const request_t *r)
+{
+    set_enable(r, 0);
+}
+
 static const command_t motor_commands[] = {
-    {"rel",    cmd_rel},
-    {"abs",    cmd_abs},
-    {"stop",   cmd_stop},
-    {"pos",    cmd_pos},
-    {"status", cmd_status},
-    {"speed",  NULL},
-    {"accel",  NULL},
-    {"micro",  NULL},
-    {"zero",   NULL},
-    {"home",   NULL},
-    {"lock",   NULL},
-    {"unlock", NULL},
-    {NULL, NULL},
+    {"rel",    CLASS_WRITE, cmd_rel},
+    {"abs",    CLASS_WRITE, cmd_abs},
+    {"stop",   CLASS_WRITE, cmd_stop},
+    {"pos",    CLASS_READ,  cmd_pos},
+    {"status", CLASS_READ,  cmd_status},
+    {"speed",  CLASS_WRITE, cmd_speed},
+    {"accel",  CLASS_WRITE, cmd_accel},
+    {"micro",  CLASS_WRITE, cmd_micro},
+    {"zero",   CLASS_WRITE, cmd_zero},
+    {"home",   CLASS_WRITE, NULL},
+    {"lock",   CLASS_WRITE, cmd_lock},
+    {"unlock", CLASS_WRITE, cmd_unlock},
+    {NULL, 0, NULL},
 };
 
 // ---- Daemon commands -----
@@ -261,15 +357,57 @@ static void cmd_devices(const request_t *r)
     send_reply(r->c, r->client, reply);
 }
 
+// The lease (D-R18). lease and renew return timeout_ms, the time it is
+// held for without renewal.
+static void lease_reply(const request_t *r, bool ok)
+{
+    if (!ok) {
+        reply_error(r, "lease_held", "lease held by another client");
+        return;
+    }
+    cJSON *reply = new_reply(r->seq, true);
+    cJSON_AddNumberToObject(reply, "timeout_ms", r->c->lease.timeout_ms);
+    send_reply(r->c, r->client, reply);
+}
+
+static void cmd_lease(const request_t *r)
+{
+    lease_t *l = &r->c->lease;
+    bool had = lease_holder(l, monotonic_ms()) == lease_key(r->client);
+    bool ok = lease_take(l, lease_key(r->client), monotonic_ms());
+    if (ok && !had)
+        log_info("client %u: lease taken", server_client_id(r->c->server, r->client));
+    lease_reply(r, ok);
+}
+
+static void cmd_renew(const request_t *r)
+{
+    bool ok = lease_renew(&r->c->lease, lease_key(r->client), monotonic_ms());
+    if (!ok) {
+        reply_error(r, "lease_held", "this client doesn't hold the lease");
+        return;
+    }
+    lease_reply(r, true);
+}
+
+static void cmd_release(const request_t *r)
+{
+    lease_t *l = &r->c->lease;
+    if (lease_holder(l, monotonic_ms()) == lease_key(r->client))
+        log_info("client %u: lease released", server_client_id(r->c->server, r->client));
+    lease_release(l, lease_key(r->client));
+    send_reply(r->c, r->client, new_reply(r->seq, true));
+}
+
 static const command_t daemon_commands[] = {
-    {"estop",   cmd_estop},
-    {"devices", cmd_devices},
-    {"lease",   NULL},
-    {"renew",   NULL},
-    {"release", NULL},
-    {"watch",   NULL},
-    {"unwatch", NULL},
-    {NULL, NULL},
+    {"estop",   CLASS_EMERGENCY, cmd_estop},
+    {"devices", CLASS_READ,      cmd_devices},
+    {"lease",   CLASS_SESSION,   cmd_lease},
+    {"renew",   CLASS_SESSION,   cmd_renew},
+    {"release", CLASS_SESSION,   cmd_release},
+    {"watch",   CLASS_READ,      NULL},
+    {"unwatch", CLASS_READ,      NULL},
+    {NULL, 0, NULL},
 };
 
 // ---- Dispatch -----
@@ -282,9 +420,13 @@ static const command_t *find(const command_t *table, const char *name)
     return NULL;
 }
 
+// The lease check (D-R16–D-R18), then the command
 static void run(const request_t *r, const command_t *cmd)
 {
-    if (cmd->fn == NULL)
+    if (!lease_check(&r->c->lease, cmd->cls, lease_key(r->client), monotonic_ms()))
+        reply_error(r, "lease_held", lease_holder(&r->c->lease, monotonic_ms()) == 0
+                    ? "take the lease first" : "lease held by another client");
+    else if (cmd->fn == NULL)
         reply_error(r, "not_impl", "not implemented yet");
     else
         cmd->fn(r);

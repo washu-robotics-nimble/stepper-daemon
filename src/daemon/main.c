@@ -135,8 +135,9 @@ int main(int argc, char *argv[])
     static server_t server;
     static commands_t commands;
     link_init(&link, fd, (uint32_t)cfg.reply_timeout_ms, on_event, &model);
-    commands_init(&commands, &link, &model, &hs, &server);
-    if (server_open(&server, cfg.socket, cfg.group, commands_line, &commands) != 0) {
+    commands_init(&commands, &link, &model, &hs, &server, (uint32_t)cfg.lease_timeout_ms);
+    if (server_open(&server, cfg.socket, cfg.group, commands_line, commands_client_gone,
+                    &commands) != 0) {
         serial_close(fd);
         return EXIT_FAILURE;
     }

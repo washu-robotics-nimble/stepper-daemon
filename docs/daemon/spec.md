@@ -36,8 +36,8 @@ To ensure precision and consistency, units are in:
 - `D-R16` Read-only and session commands MUST be accepted from any client at any time, and need no lease. (`D-G2`)
 - `D-R17` Emergency commands MUST be honored from any client at any time, with or without a lease, and MUST be sent to the firmware ahead of all other queued traffic. (`D-G1`)
 - `D-R18` A write command MUST be rejected with a "lease held" error unless the sender holds the lease. Lease rules: (`D-G2`)
-  - acquired explicitly and kept by renewal;
-  - expires after 5 s (configurable) without renewal;
+  - acquired explicitly and kept by renewal (`lease` or `renew`; no other command renews it);
+  - expires after 5 s (configurable: `lease_timeout_ms` in `[daemon]`) without renewal;
   - freed immediately on release or disconnect;
   - only one client holds it at a time;
   - running move when the lease expires: continue;
@@ -109,9 +109,11 @@ Arguments are listed in braces as JSON keys. Results are returned as keys in the
 | `stop` | write | Stop the current move. Returns `pos`, where the move ends | lease held, not moving |
 | `speed` / `accel` / `micro` {`value`} | write | Set a parameter (rejected when moving) | lease held, busy, bad parameter |
 | `pos` / `status` | read | Report state. `pos` returns `pos`, `pos_valid`; `status` returns `pos`, `pos_valid`, `moving`, `locked` (driver enabled) | n/a |
-| `zero` | write | Set the current position to 0 | lease held |
+| `zero` | write | Set the current position to 0; the position becomes valid | lease held, busy |
 | `home` | write | Run the homing sequence | lease held, no endstop, not implemented yet |
-| `lock` / `unlock` | write | Enable or disable the driver output | lease held |
+| `lock` / `unlock` | write | Enable or disable the driver output. `unlock` voids the position, since the motor can then turn freely | lease held |
+
+`speed`, `accel` and `micro` set the firmware's `speed`, `accel` and `microsteps` (`value` is an int32, and the firmware checks its range and the combination, F-R2). The values the firmware accepts are kept and re-sent after a reconnect instead of the INI's, until the daemon restarts (D-R3).
 
 `rel` and `abs` reply once the firmware has accepted the move, not when it ends; `status` shows `moving` until it has ended. Their `steps` and `pos` are int32 (`bad_param` otherwise). The firmware's own checks can reject them too: `busy`, `bad_param` (e.g. a target outside the soft limits), and `pos_invalid` for any move while soft limits are set and the position is invalid (F-R25). `abs` is rejected with `pos_invalid` whenever the position is invalid, without asking the firmware.
 
@@ -132,7 +134,7 @@ Commands without `dev`.
 
 | Command | Class | Effect | Errors |
 |---|---|---|---|
-| `lease` / `renew` / `release` | session | Acquire, keep or give up the lease | lease held by another client |
+| `lease` / `renew` / `release` | session | Acquire, keep or give up the lease (D-R18). `lease` takes it, or renews it if the sender holds it already; `renew` needs the sender to hold it (not expired). Both return `timeout_ms`, how long it is held without renewal. `release` frees it if the sender holds it, and otherwise does nothing; it always succeeds | lease held (by another client; for `renew`, also when the sender doesn't hold it) |
 | `watch` / `unwatch` | read | Subscribe to or unsubscribe from `status` events (D-R21) | n/a |
 | `devices` | read | List the devices (D-R43). Returns `devices`, a list of `{"dev":oid,"type":type}` in the firmware's order | link down |
 | `estop` | emergency | Stop everything now (F-R24) | n/a |

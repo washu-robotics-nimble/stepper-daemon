@@ -60,6 +60,22 @@ static struct {
     double wait_seq;            // -1: a raw request without a valid seq, which
                                 // only a bad_request event answers
     uint64_t wait_until;
+    enum {
+        STEP_PLAIN,             // the user's request; its reply is printed
+        STEP_LEASE,             // automatic lease for a write: lease sent
+        STEP_WRITE,             // ...the write sent; its reply is printed
+        STEP_RELEASE,           // ...release sent; its reply isn't printed
+        STEP_RENEW,             // renew of the user's own lease, without a terminal
+    } step;
+    cJSON *held;                // STEP_LEASE: the write, sent once the lease is ours
+    char user_cmd[16];          // STEP_PLAIN: its cmd, to follow lease / release
+
+    // The lease, taken by the user with "lease" (D-R18): kept, and renewed
+    // in the background until "release"
+    bool lease_mine;
+    uint32_t lease_timeout_ms;
+    uint64_t next_renew;
+    uint32_t renew_seq;         // renew in flight; 0: none
 
     // Status bar (interactive only)
     bool bar;
@@ -136,7 +152,9 @@ static const char *bar_text(char *text, size_t size)
         moving |= d->known && d->moving;
     }
     if (len == 0)
-        snprintf(text, size, "no motors");
+        len = snprintf(text, size, "no motors");
+    if (S.lease_mine && len < size)
+        snprintf(text + len, size - len, "   lease: yours");
     return moving ? STYLE_MOVING : STYLE_IDLE;
 }
 
@@ -301,6 +319,76 @@ static void got_status(bar_dev_t *d, const cJSON *msg)
     d->known = true;
 }
 
+static bool send_step(cJSON *req, int step);
+
+// The user's request is over (answered, failed, or given up on)
+static void end_wait(void)
+{
+    S.waiting = false;
+    cJSON_Delete(S.held);
+    S.held = NULL;
+}
+
+static void send_simple(const char *cmd, int step)
+{
+    cJSON *req = cJSON_CreateObject();
+    cJSON_AddStringToObject(req, "cmd", cmd);
+    send_step(req, step);
+    cJSON_Delete(req);
+}
+
+// The reply to the user's request, or to a step of the automatic lease
+// around a write: lease, the write, release (D-R18)
+static void got_reply(const char *line, const cJSON *msg)
+{
+    bool ok = acked(msg);
+
+    S.waiting = false;
+    switch (S.step) {
+    case STEP_LEASE:
+        if (ok) {
+            cJSON *write = S.held;
+            S.held = NULL;
+            send_step(write, STEP_WRITE);
+            cJSON_Delete(write);
+        } else {
+            // Held by another client: this reply is the answer
+            S.failed = true;
+            print_line(stdout, line);
+            end_wait();
+        }
+        break;
+    case STEP_WRITE:
+        if (!ok)
+            S.failed = true;
+        print_line(stdout, line);
+        send_simple("release", STEP_RELEASE);
+        break;
+    case STEP_RELEASE:
+        break;
+    case STEP_RENEW:
+        if (!ok) {
+            S.lease_mine = false;
+            print_line(stderr, "lease lost: it expired, or another client took it");
+        }
+        break;
+    case STEP_PLAIN:
+        if (!ok)
+            S.failed = true;
+        print_line(stdout, line);
+        // The user's own lease: kept and renewed until released
+        if (ok && strcmp(S.user_cmd, "lease") == 0) {
+            const cJSON *t = cJSON_GetObjectItemCaseSensitive(msg, "timeout_ms");
+            S.lease_mine = true;
+            S.lease_timeout_ms = cJSON_IsNumber(t) && t->valuedouble >= 2 ? (uint32_t)t->valuedouble : 5000;
+            S.next_renew = now_ms() + S.lease_timeout_ms / 2;
+        } else if (strcmp(S.user_cmd, "release") == 0) {
+            S.lease_mine = false;
+        }
+        break;
+    }
+}
+
 static void on_line(void *ctx, const char *line, const cJSON *msg)
 {
     (void)ctx;
@@ -310,7 +398,7 @@ static void on_line(void *ctx, const char *line, const cJSON *msg)
     if (cJSON_IsString(evt)) {
         // A bad_request event answers a request whose seq couldn't be read
         if (S.waiting && strcmp(evt->valuestring, "bad_request") == 0) {
-            S.waiting = false;
+            end_wait();
             S.failed = true;
         }
         print_line(stdout, line);
@@ -321,15 +409,18 @@ static void on_line(void *ctx, const char *line, const cJSON *msg)
         return;
     }
     if (S.waiting && seq->valuedouble == S.wait_seq) {
-        S.waiting = false;
-        if (!acked(msg))
-            S.failed = true;
-        print_line(stdout, line);
+        got_reply(line, msg);
+        redraw_bar();
         return;
     }
 
-    // The status bar's own requests
-    if (S.devices_seq != 0 && seq->valuedouble == S.devices_seq) {
+    if (S.renew_seq != 0 && seq->valuedouble == S.renew_seq) {
+        S.renew_seq = 0;
+        if (!acked(msg) && S.lease_mine) {
+            S.lease_mine = false;
+            print_line(stdout, "lease lost: it expired, or another client took it");
+        }
+    } else if (S.devices_seq != 0 && seq->valuedouble == S.devices_seq) {
         S.devices_seq = 0;
         got_devices(msg);
     } else {
@@ -349,8 +440,10 @@ static void lost_connection(void)
 {
     S.have_devices = false;
     S.devices_seq = 0;
+    S.renew_seq = 0;
+    S.lease_mine = false;       // freed by the disconnect (D-R18)
     if (S.waiting) {
-        S.waiting = false;
+        end_wait();
         print_error("error: nimhubd closed the connection", NULL);
     }
     S.next_connect = now_ms() + RECONNECT_MS;
@@ -393,11 +486,24 @@ static void poll_bar(void)
             S.devs[i].poll_seq = bar_request("status", S.devs[i].dev);
 }
 
-static void send_user(cJSON *req)
+// The renewal of the user's own lease, at half its timeout
+static void renew_lease(void)
+{
+    uint64_t now = now_ms();
+    if (!S.lease_mine || !connected() || now < S.next_renew)
+        return;
+    S.next_renew = now + S.lease_timeout_ms / 2;
+    S.renew_seq = bar_request("renew", NULL);
+}
+
+// Send a request the user waits for, as this step; seq is added unless req
+// has one. False if it couldn't be sent (then the wait is over).
+static bool send_step(cJSON *req, int step)
 {
     if (!connected()) {
+        end_wait();
         print_error("error: not connected to nimhubd (%s)", S.path);
-        return;
+        return false;
     }
     const cJSON *seq = cJSON_GetObjectItemCaseSensitive(req, "seq");
     if (seq == NULL)
@@ -407,11 +513,37 @@ static void send_user(cJSON *req)
 
     if (!conn_send(&S.conn, req)) {
         lost_connection();
+        end_wait();
         print_error("error: not connected to nimhubd (%s)", S.path);
-        return;
+        return false;
     }
+    S.step = step;
     S.waiting = true;
     S.wait_until = now_ms() + REPLY_TIMEOUT_MS;
+    return true;
+}
+
+// A typed request: a write gets the lease around it, unless the user holds
+// it already (D-R18); raw JSON goes out as it is
+static void send_user(cJSON *req, bool raw)
+{
+    const cJSON *cmd = cJSON_GetObjectItemCaseSensitive(req, "cmd");
+    snprintf(S.user_cmd, sizeof S.user_cmd, "%s",
+             !raw && cJSON_IsString(cmd) ? cmd->valuestring : "");
+
+    if (!raw && cli_is_write(req) && !S.lease_mine) {
+        S.held = cJSON_Duplicate(req, true);
+        send_simple("lease", STEP_LEASE);
+    } else {
+        send_step(req, STEP_PLAIN);
+    }
+}
+
+static void wait_timed_out(void)
+{
+    // An automatic lease taken but not released expires on its own
+    end_wait();
+    print_error("error: no reply from nimhubd", NULL);
 }
 
 static void handle_line(const char *line)
@@ -419,7 +551,8 @@ static void handle_line(const char *line)
     cJSON *req;
     char err[128];
 
-    switch (cli_parse(line, &req, err, sizeof err)) {
+    cli_kind_t kind = cli_parse(line, &req, err, sizeof err);
+    switch (kind) {
     case CLI_EMPTY:
         break;
     case CLI_HELP:
@@ -432,7 +565,8 @@ static void handle_line(const char *line)
         print_error("error: %s", err);
         break;
     case CLI_REQUEST:
-        send_user(req);
+    case CLI_RAW:
+        send_user(req, kind == CLI_RAW);
         cJSON_Delete(req);
         break;
     }
@@ -446,14 +580,26 @@ static void wait_reply(void)
     while (S.waiting) {
         int left = (int)(S.wait_until - now_ms());
         if (left <= 0) {
-            S.waiting = false;
-            print_error("error: no reply from nimhubd", NULL);
+            wait_timed_out();
             return;
         }
         struct pollfd pfd = {.fd = S.conn.fd, .events = POLLIN};
         if (poll(&pfd, 1, left) > 0 && !conn_read(&S.conn, on_line, NULL))
             lost_connection();
     }
+}
+
+// Without a terminal there is no background loop: the user's own lease is
+// renewed before the next command, once half its timeout has passed. Only
+// lease and renew keep it (D-R18).
+static void renew_before_command(void)
+{
+    uint64_t now = now_ms();
+    if (!S.lease_mine || !connected() || now < S.next_renew)
+        return;
+    S.next_renew = now + S.lease_timeout_ms / 2;
+    send_simple("renew", STEP_RENEW);
+    wait_reply();
 }
 
 // One-shot (line != NULL) or stdin mode
@@ -471,6 +617,7 @@ static int run_batch(const char *line)
         size_t size = 0;
         while (!S.quit && getline(&buf, &size, stdin) >= 0) {
             buf[strcspn(buf, "\n")] = '\0';
+            renew_before_command();
             handle_line(buf);
             wait_reply();
         }
@@ -507,10 +654,9 @@ static int run_interactive(void)
             }
         }
         poll_bar();
-        if (S.waiting && now >= S.wait_until) {
-            S.waiting = false;
-            print_error("error: no reply from nimhubd", NULL);
-        }
+        renew_lease();
+        if (S.waiting && now >= S.wait_until)
+            wait_timed_out();
         if (!S.editing && !S.waiting)
             begin_edit();
 
@@ -529,6 +675,8 @@ static int run_interactive(void)
         timeout = timeout_until(connected() ? S.next_poll : S.next_connect, now, timeout);
         if (S.waiting)
             timeout = timeout_until(S.wait_until, now, timeout);
+        if (S.lease_mine)
+            timeout = timeout_until(S.next_renew, now, timeout);
         if (poll(pfds, (nfds_t)n, timeout) <= 0)
             continue;
 

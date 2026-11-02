@@ -6,13 +6,13 @@
 #include "cJSON.h"
 #include "parse.h"
 
-// Parse line as a request and compare it, printed, with expect
-static void expect_request(const char *line, const char *expect)
+// Parse line as a request of this kind and compare it, printed, with expect
+static void expect_kind_request(const char *line, cli_kind_t kind, const char *expect)
 {
     cJSON *req;
     char err[128];
 
-    assert(cli_parse(line, &req, err, sizeof err) == CLI_REQUEST);
+    assert(cli_parse(line, &req, err, sizeof err) == kind);
     char *got = cJSON_PrintUnformatted(req);
     if (strcmp(got, expect) != 0) {
         fprintf(stderr, "%s\n  got      %s\n  expected %s\n", line, got, expect);
@@ -20,6 +20,24 @@ static void expect_request(const char *line, const char *expect)
     }
     cJSON_free(got);
     cJSON_Delete(req);
+}
+
+static void expect_request(const char *line, const char *expect)
+{
+    expect_kind_request(line, CLI_REQUEST, expect);
+}
+
+// Whether the line's request is a write command (needs the lease)
+static bool is_write(const char *line)
+{
+    cJSON *req;
+    char err[128];
+
+    cli_kind_t kind = cli_parse(line, &req, err, sizeof err);
+    assert(kind == CLI_REQUEST || kind == CLI_RAW);
+    bool w = cli_is_write(req);
+    cJSON_Delete(req);
+    return w;
 }
 
 static void expect_kind(const char *line, cli_kind_t kind)
@@ -56,8 +74,23 @@ int main(void)
     expect_request("devices", "{\"cmd\":\"devices\"}");
     expect_request("frobnicate", "{\"cmd\":\"frobnicate\"}");
     // Raw JSON, as it is
-    expect_request("{\"seq\":9,\"cmd\":\"estop\"}", "{\"seq\":9,\"cmd\":\"estop\"}");
-    expect_request("  {\"cmd\":\"devices\"}", "{\"cmd\":\"devices\"}");
+    expect_kind_request("{\"seq\":9,\"cmd\":\"estop\"}", CLI_RAW, "{\"seq\":9,\"cmd\":\"estop\"}");
+    expect_kind_request("  {\"cmd\":\"devices\"}", CLI_RAW, "{\"cmd\":\"devices\"}");
+
+    // Write commands (D-R13): device commands that change something
+    static const char *const writes[] = {
+        "m0 rel 1", "m0 abs 1", "m0 stop", "m0 speed 1", "m0 accel 1", "m0 micro 4",
+        "m0 zero", "m0 home", "m0 lock", "m0 unlock",
+    };
+    for (size_t i = 0; i < sizeof writes / sizeof writes[0]; i++)
+        assert(is_write(writes[i]));
+    static const char *const others[] = {
+        "m0 pos", "m0 status", "m0 fly", "estop", "devices", "lease", "release", "rel",
+    };
+    for (size_t i = 0; i < sizeof others / sizeof others[0]; i++)
+        assert(!is_write(others[i]));
+    // Raw JSON is classified too; the CLI just doesn't wrap it in a lease
+    assert(is_write("{\"dev\":\"m0\",\"cmd\":\"rel\",\"steps\":1}"));
 
     // Local
     expect_kind("", CLI_EMPTY);
