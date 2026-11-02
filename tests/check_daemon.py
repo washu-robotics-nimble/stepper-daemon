@@ -400,6 +400,85 @@ def err(reply, code):
     return isinstance(reply, dict) and reply.get("ack") is False and reply.get("err") == code
 
 
+STATE_KEYS = {"evt", "dev", "pos", "pos_valid", "moving", "locked"}
+
+
+def events_until(w, done, timeout=10.0):
+    """w's events until done(event) is true for one (included), or timeout"""
+    got = []
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        e = w.event(max(0.0, deadline - time.monotonic()))
+        if e is None:
+            break
+        got.append(e)
+        if done(e):
+            break
+    return got
+
+
+def quiet(cl, seconds=0.5):
+    """True if nothing arrives for cl within seconds"""
+    return not cl.events and cl.receive(seconds) is None
+
+
+def watch_checks(b, c):
+    """watch and status events (D-R21, D-R22). c holds the lease; m0 is idle,
+    with an invalid position, unlocked."""
+    w = Client(b.socket)
+    try:
+        r = w.call("watch")
+        snap = events_until(w, lambda e: e.get("dev") == "m1", 2.0)
+        check("watch: the reply, then the state of every device",
+              acked(r) and [e.get("dev") for e in snap] == ["m0", "m1"]
+              and all(e.get("evt") == "status" and set(e) == STATE_KEYS for e in snap), str(snap))
+        st = c.call("status", "m0")
+        check("...the same state status gives",
+              snap and {k: snap[0][k] for k in ("pos", "pos_valid", "moving", "locked")}
+              == {k: st[k] for k in ("pos", "pos_valid", "moving", "locked")}, f"{snap} {st}")
+        check("no events while nothing changes", quiet(w))
+        start = snap[0]["pos"] if snap else 0
+
+        c.call("rel", "m0", steps=400)
+        evs = events_until(w, lambda e: e.get("moving") is False)
+        check("a move: moving first, then positions, then the end at the target",
+              len(evs) >= 3 and evs[0].get("moving") is True and evs[0].get("pos") == start
+              and evs[-1].get("moving") is False and evs[-1].get("pos") == start + 400, str(evs))
+        check("...one event per change: no two in a row the same",
+              all(a != b2 for a, b2 in zip(evs, evs[1:])), str(evs))
+        check("...positions only grow", all(a["pos"] <= b2["pos"] for a, b2 in zip(evs, evs[1:])),
+              str(evs))
+        check("...all for m0, with every field (D-R22)",
+              all(e.get("dev") == "m0" and set(e) == STATE_KEYS for e in evs), str(evs))
+        check("the client that moved it, not watching, gets no events", quiet(c, 0.2))
+
+        c.call("zero", "m0")
+        e = w.event()
+        check("zero: one event, pos 0 and valid",
+              e is not None and e.get("pos") == 0 and e.get("pos_valid") is True, str(e))
+        c.call("lock", "m0")
+        e = w.event()
+        check("lock: one event, locked", e is not None and e.get("locked") is True, str(e))
+        c.call("unlock", "m0")
+        e = w.event()
+        check("unlock: one event, free and position void", e is not None
+              and e.get("locked") is False and e.get("pos_valid") is False, str(e))
+        check("...and nothing more", quiet(w, 0.3))
+        r = c.call("stop", "m0")
+        check("a command that changes nothing: no event", err(r, "not_moving") and quiet(w, 0.3))
+
+        r = w.call("watch")
+        snap = events_until(w, lambda e: e.get("dev") == "m1", 2.0)
+        check("watch again: the state again", acked(r) and len(snap) == 2, str(snap))
+        r = w.call("unwatch")
+        c.call("rel", "m0", steps=10)
+        check("unwatch: no more events", acked(r) and quiet(w, 1.0))
+        check("unwatch again: fine", acked(w.call("unwatch")))
+        c.wait_idle()
+    finally:
+        w.close()
+
+
 # No soft limits: with the position still invalid, a move is only allowed
 # without them (F-R25)
 M0_FREE = "microsteps = 4\nspeed = 300\naccel = 1000\npulse_width_us = 10\n"
@@ -490,7 +569,6 @@ def client_checks(b):
             ("device command without dev: unknown_cmd", c.call("rel", steps=1), "unknown_cmd"),
             ("daemon command with dev: unknown_cmd", c.call("estop", "m0"), "unknown_cmd"),
             ("home: not_impl", c.call("home", "m0"), "not_impl"),
-            ("watch: not_impl", c.call("watch"), "not_impl"),
             ("speed 'x': bad_param", c.call("speed", "m0", value="x"), "bad_param"),
             ("speed without value: bad_param", c.call("speed", "m0"), "bad_param"),
             ("rel steps 'x': bad_param", c.call("rel", "m0", steps="x"), "bad_param"),
@@ -561,6 +639,8 @@ def client_checks(b):
         check("zero, lock, unlock are sent as set_position 0, set_enable 1 and 0",
               [(f["cmd"], f.get("pos", f.get("value"))) for f in frames[-3:]]
               == [("set_position", 0), ("set_enable", 1), ("set_enable", 0)], str(frames[-3:]))
+
+        watch_checks(b, c)
 
         # Several clients (D-R10), at most 8; one lease (D-R18)
         c2 = Client(b.socket)
@@ -721,6 +801,23 @@ def client_checks(b):
     check("before the handshake is done: link_down", err(r, "link_down"), str(r))
     r = c.call("devices")
     check("devices before the handshake is done: link_down", err(r, "link_down"), str(r))
+    r = c.call("watch")
+    check("watch before the handshake is done: accepted, no devices to report yet",
+          acked(r) and quiet(c, 0.2), str(r))
+    c.close()
+    d.stop()
+    dummy.stop()
+
+    # ...then, once it is done, the state of every device
+    dummy = Dummy(b.tty, "--objects", "m0:stepper,m1:stepper", "--busy-ms", "500")
+    d = b.daemon(b.ini(m0=M0_FREE))
+    d.wait_for("listening on")
+    c = Client(b.socket)
+    r = c.call("watch")
+    evs = events_until(c, lambda e: e.get("dev") == "m1", 3.0)
+    check("watching before the handshake: every device's state once it is done",
+          acked(r) and d.has("handshake: done")
+          and [e.get("dev") for e in evs] == ["m0", "m1"], f"{r} {evs}")
     c.close()
     d.stop()
     dummy.stop()

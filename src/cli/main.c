@@ -1,7 +1,7 @@
 // nimhub-cli: the command-line client for nimhubd (D-R15, build plan step 10)
 //
 // Interactive on a terminal: a prompt with line editing (linenoise), and a
-// status bar below it, polled with status every 250 ms. With a command on
+// status bar below it, following nimhubd's status events (watch). With a command on
 // the command line, it sends that one; with stdin not a terminal, one per
 // line. Replies are printed as nimhubd sends them.
 
@@ -22,7 +22,7 @@
 #include "parse.h"
 
 #define SOCKET_DEFAULT   "/run/nimhubd/control.sock"   // D-R12
-#define POLL_MS          250    // status bar
+#define RETRY_MS         250    // devices, until nimhubd has the MCU
 #define RECONNECT_MS     1000
 #define REPLY_TIMEOUT_MS 3000   // nimhubd answers within its own 500 ms (D-R30)
 #define MAX_DEVS         32
@@ -42,10 +42,9 @@
 typedef struct {
     char dev[32];
     bool motor;
-    bool known;             // a status reply arrived
+    bool known;             // a status event arrived
     int32_t pos;
     bool pos_valid, moving, locked;
-    uint32_t poll_seq;      // status request in flight; 0: none
 } bar_dev_t;
 
 static struct {
@@ -83,8 +82,10 @@ static struct {
     bar_dev_t devs[MAX_DEVS];
     bool have_devices;
     uint32_t devices_seq;       // devices request in flight; 0: none
+    uint32_t watch_seq;         // watch request in flight; 0: none
     bool link_down;
-    uint64_t next_poll, next_connect;
+    uint64_t next_devices;      // retry devices (link down) at; 0: now
+    uint64_t next_connect;
 
     // Line editing
     bool editing;
@@ -278,6 +279,8 @@ static bool is_link_down(const cJSON *msg)
     return cJSON_IsString(err) && strcmp(err->valuestring, "link_down") == 0;
 }
 
+static uint32_t bar_request(const char *cmd, const char *dev);
+
 static void got_devices(const cJSON *msg)
 {
     S.link_down = is_link_down(msg);
@@ -298,18 +301,20 @@ static void got_devices(const cJSON *msg)
         d->motor = cJSON_IsString(type) && strcmp(type->valuestring, "stepper") == 0;
     }
     S.have_devices = true;
-    S.next_poll = 0;    // their status right away
+    // Their state comes with watch, and every change after it (D-R21)
+    S.watch_seq = bar_request("watch", NULL);
 }
 
-static void got_status(bar_dev_t *d, const cJSON *msg)
+// A status event: one device's state (D-R22)
+static void got_status(const cJSON *msg)
 {
-    if (!acked(msg)) {
-        // The device list is stale (e.g. a reconnect, step 13)
-        S.link_down = is_link_down(msg);
-        S.have_devices = false;
+    const cJSON *dev = cJSON_GetObjectItemCaseSensitive(msg, "dev");
+    bar_dev_t *d = NULL;
+    for (size_t i = 0; i < S.ndev && cJSON_IsString(dev); i++)
+        if (strcmp(S.devs[i].dev, dev->valuestring) == 0)
+            d = &S.devs[i];
+    if (d == NULL)
         return;
-    }
-    S.link_down = false;
     const cJSON *pos = cJSON_GetObjectItemCaseSensitive(msg, "pos");
     if (cJSON_IsNumber(pos))
         d->pos = (int32_t)pos->valuedouble;
@@ -396,6 +401,12 @@ static void on_line(void *ctx, const char *line, const cJSON *msg)
     const cJSON *seq = cJSON_GetObjectItemCaseSensitive(msg, "seq");
 
     if (cJSON_IsString(evt)) {
+        // In interactive mode, status events drive the bar, and aren't printed
+        if (S.bar && strcmp(evt->valuestring, "status") == 0) {
+            got_status(msg);
+            redraw_bar();
+            return;
+        }
         // A bad_request event answers a request whose seq couldn't be read
         if (S.waiting && strcmp(evt->valuestring, "bad_request") == 0) {
             end_wait();
@@ -423,15 +434,8 @@ static void on_line(void *ctx, const char *line, const cJSON *msg)
     } else if (S.devices_seq != 0 && seq->valuedouble == S.devices_seq) {
         S.devices_seq = 0;
         got_devices(msg);
-    } else {
-        for (size_t i = 0; i < S.ndev; i++) {
-            bar_dev_t *d = &S.devs[i];
-            if (d->poll_seq != 0 && seq->valuedouble == d->poll_seq) {
-                d->poll_seq = 0;
-                got_status(d, msg);
-                break;
-            }
-        }
+    } else if (S.watch_seq != 0 && seq->valuedouble == S.watch_seq) {
+        S.watch_seq = 0;
     }
     redraw_bar();
 }
@@ -440,6 +444,8 @@ static void lost_connection(void)
 {
     S.have_devices = false;
     S.devices_seq = 0;
+    S.watch_seq = 0;
+    S.next_devices = 0;
     S.renew_seq = 0;
     S.lease_mine = false;       // freed by the disconnect (D-R18)
     if (S.waiting) {
@@ -470,20 +476,15 @@ static uint32_t bar_request(const char *cmd, const char *dev)
     return seq;
 }
 
-static void poll_bar(void)
+// The bar's devices: asked for once connected, and again every RETRY_MS
+// while nimhubd has no MCU (link_down); watch follows the reply
+static void bar_devices(void)
 {
     uint64_t now = now_ms();
-    if (!connected() || now < S.next_poll)
+    if (!connected() || S.have_devices || S.devices_seq != 0 || now < S.next_devices)
         return;
-    S.next_poll = now + POLL_MS;
-    if (!S.have_devices) {
-        S.devices_seq = bar_request("devices", NULL);
-        return;
-    }
-    // A request still unanswered is overtaken: its reply is ignored
-    for (size_t i = 0; i < S.ndev && connected(); i++)
-        if (S.devs[i].motor)
-            S.devs[i].poll_seq = bar_request("status", S.devs[i].dev);
+    S.next_devices = now + RETRY_MS;
+    S.devices_seq = bar_request("devices", NULL);
 }
 
 // The renewal of the user's own lease, at half its timeout
@@ -639,21 +640,17 @@ static int run_interactive(void)
     linenoiseSetCompletionCallback(complete);
     linenoiseHistorySetMaxLen(200);
     printf("nimhub-cli: nimhubd at %s. Type 'help' for commands.\n", S.path);
-    if (conn_open(&S.conn, S.path))
-        S.next_poll = 0;
-    else
+    if (!conn_open(&S.conn, S.path))
         S.next_connect = now_ms() + RECONNECT_MS;
 
     while (!S.quit) {
         uint64_t now = now_ms();
         if (!connected() && now >= S.next_connect) {
             S.next_connect = now + RECONNECT_MS;
-            if (conn_open(&S.conn, S.path)) {
-                S.next_poll = 0;
+            if (conn_open(&S.conn, S.path))
                 redraw_bar();
-            }
         }
-        poll_bar();
+        bar_devices();
         renew_lease();
         if (S.waiting && now >= S.wait_until)
             wait_timed_out();
@@ -672,7 +669,10 @@ static int run_interactive(void)
         }
         int timeout = -1;
         now = now_ms();
-        timeout = timeout_until(connected() ? S.next_poll : S.next_connect, now, timeout);
+        if (!connected())
+            timeout = timeout_until(S.next_connect, now, timeout);
+        else if (!S.have_devices && S.devices_seq == 0)
+            timeout = timeout_until(S.next_devices, now, timeout);
         if (S.waiting)
             timeout = timeout_until(S.wait_until, now, timeout);
         if (S.lease_mine)

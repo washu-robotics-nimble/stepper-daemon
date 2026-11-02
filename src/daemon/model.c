@@ -111,6 +111,21 @@ void model_enabled(model_device_t *d, bool enabled)
         d->pos_valid = false;
 }
 
+bool model_take_change(model_device_t *d)
+{
+    if (!d->known)
+        return false;
+    if (d->sent && d->sent_pos == d->pos && d->sent_pos_valid == d->pos_valid
+        && d->sent_moving == d->moving && d->sent_locked == d->locked)
+        return false;
+    d->sent = true;
+    d->sent_pos = d->pos;
+    d->sent_pos_valid = d->pos_valid;
+    d->sent_moving = d->moving;
+    d->sent_locked = d->locked;
+    return true;
+}
+
 void model_link_down(model_t *m)
 {
     for (size_t i = 0; i < m->count; i++)

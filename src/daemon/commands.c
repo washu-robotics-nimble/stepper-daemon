@@ -53,6 +53,7 @@ void commands_init(commands_t *c, link_t *link, model_t *model,
     c->hs = hs;
     c->server = server;
     lease_init(&c->lease, lease_timeout_ms);
+    memset(c->watching, 0, sizeof c->watching);
 }
 
 // A client as a lease key: never 0, and a new one for every connection
@@ -68,6 +69,49 @@ void commands_client_gone(void *ctx, server_client_t client)
     if (lease_holder(&c->lease, monotonic_ms()) == lease_key(client))
         log_info("client %u: lease freed (disconnected)", server_client_id(c->server, client));
     lease_release(&c->lease, lease_key(client));
+    c->watching[client.index] = false;
+}
+
+// ---- Status events (D-R21) -----
+
+// A stepper's reported state, from one snapshot of the model (D-R22): the
+// fields of status replies and status events
+static void add_state(cJSON *msg, const model_device_t *d)
+{
+    cJSON_AddNumberToObject(msg, "pos", d->pos);
+    cJSON_AddBoolToObject(msg, "pos_valid", d->pos_valid);
+    cJSON_AddBoolToObject(msg, "moving", d->moving);
+    cJSON_AddBoolToObject(msg, "locked", d->locked);
+}
+
+static void send_status_event(commands_t *c, server_client_t client, const model_device_t *d)
+{
+    cJSON *evt = cJSON_CreateObject();
+    cJSON_AddStringToObject(evt, "evt", "status");
+    cJSON_AddStringToObject(evt, "dev", d->oid);
+    add_state(evt, d);
+    server_send(c->server, client, evt);
+    cJSON_Delete(evt);
+}
+
+static bool is_watching(const commands_t *c, int index)
+{
+    return c->watching[index] && server_client_id(c->server,
+               (server_client_t){index, c->watching_gen[index]}) != 0;
+}
+
+void commands_broadcast(commands_t *c)
+{
+    model_t *m = c->model;
+
+    for (size_t i = 0; i < m->count; i++) {
+        model_device_t *d = &m->devices[i];
+        if (!model_is_stepper(d) || !model_take_change(d))
+            continue;
+        for (int k = 0; k < SERVER_MAX_CLIENTS; k++)
+            if (is_watching(c, k))
+                send_status_event(c, (server_client_t){k, c->watching_gen[k]}, d);
+    }
 }
 
 // ---- Replies -----
@@ -165,6 +209,8 @@ static void on_fw_reply(void *ctx, const cJSON *reply)
         }
         send_reply(c, f->client, out);
     }
+    // After the reply, so the client that sent the command gets it first
+    commands_broadcast(c);
     server_release(c->server, f->client);
     free(f);
 }
@@ -253,12 +299,8 @@ static void cmd_pos(const request_t *r)
 
 static void cmd_status(const request_t *r)
 {
-    const model_device_t *d = r->dev;
     cJSON *reply = new_reply(r->seq, true);
-    cJSON_AddNumberToObject(reply, "pos", d->pos);
-    cJSON_AddBoolToObject(reply, "pos_valid", d->pos_valid);
-    cJSON_AddBoolToObject(reply, "moving", d->moving);
-    cJSON_AddBoolToObject(reply, "locked", d->locked);
+    add_state(reply, r->dev);
     send_reply(r->c, r->client, reply);
 }
 
@@ -337,6 +379,27 @@ static void cmd_estop(const request_t *r)
     forward(r, link_new_request("estop", NULL), FW_ESTOP);
 }
 
+// watch (D-R21): the reply, then the current state of every device, then an
+// event whenever it changes. Repeating it sends the current state again.
+static void cmd_watch(const request_t *r)
+{
+    commands_t *c = r->c;
+    const model_t *m = c->model;
+
+    c->watching[r->client.index] = true;
+    c->watching_gen[r->client.index] = r->client.gen;
+    send_reply(c, r->client, new_reply(r->seq, true));
+    for (size_t i = 0; i < m->count; i++)
+        if (model_is_stepper(&m->devices[i]) && m->devices[i].known)
+            send_status_event(c, r->client, &m->devices[i]);
+}
+
+static void cmd_unwatch(const request_t *r)
+{
+    r->c->watching[r->client.index] = false;
+    send_reply(r->c, r->client, new_reply(r->seq, true));
+}
+
 // The devices the firmware reported (D-R43), for clients to discover them
 static void cmd_devices(const request_t *r)
 {
@@ -405,8 +468,8 @@ static const command_t daemon_commands[] = {
     {"lease",   CLASS_SESSION,   cmd_lease},
     {"renew",   CLASS_SESSION,   cmd_renew},
     {"release", CLASS_SESSION,   cmd_release},
-    {"watch",   CLASS_READ,      NULL},
-    {"unwatch", CLASS_READ,      NULL},
+    {"watch",   CLASS_READ,      cmd_watch},
+    {"unwatch", CLASS_READ,      cmd_unwatch},
     {NULL, 0, NULL},
 };
 

@@ -59,11 +59,14 @@ static const char *default_config(char *buf, size_t size)
     return NULL;
 }
 
-// Events from the MCU. Every frame is logged at debug level anyway; position
-// events are too frequent for more. ctx is the machine model.
+// Events from the MCU: into the model, and on to watching clients (D-R21).
+// Every frame is logged at debug level anyway; position events are too
+// frequent for more. ctx is the commands_t.
 static void on_event(void *ctx, const cJSON *evt)
 {
-    model_event(ctx, evt);
+    commands_t *c = ctx;
+    model_event(c->model, evt);
+    commands_broadcast(c);
 
     const cJSON *name = cJSON_GetObjectItemCaseSensitive(evt, "evt");
     if (cJSON_IsString(name) && strcmp(name->valuestring, "position") == 0)
@@ -134,7 +137,7 @@ int main(int argc, char *argv[])
     static handshake_t hs;
     static server_t server;
     static commands_t commands;
-    link_init(&link, fd, (uint32_t)cfg.reply_timeout_ms, on_event, &model);
+    link_init(&link, fd, (uint32_t)cfg.reply_timeout_ms, on_event, &commands);
     commands_init(&commands, &link, &model, &hs, &server, (uint32_t)cfg.lease_timeout_ms);
     if (server_open(&server, cfg.socket, cfg.group, commands_line, commands_client_gone,
                     &commands) != 0) {
@@ -181,6 +184,9 @@ int main(int argc, char *argv[])
         }
         link_tick(&link);
         handshake_tick(&hs);
+        // Whatever changed the model outside events and command replies
+        // (the handshake's get_state)
+        commands_broadcast(&commands);
     }
 
     server_close(&server);

@@ -218,7 +218,9 @@ class Pty:
         return None
 
 
-def interactive_checks(b):
+def interactive_checks(b, d):
+    with d.cond:
+        log_start = len(d.lines)
     t = Pty(b)
     check("interactive: prompt", t.wait_for("nimhub> "))
     check("interactive: status bar with m0 and m1",
@@ -228,6 +230,12 @@ def interactive_checks(b):
     check("interactive: reply printed", t.wait_for('{"seq":'), repr(t.out[-400:]))
     check("interactive: the bar follows the move", t.wait_for("moving", 2.0)
           and t.wait_for("m0 400 (invalid) idle free", 5.0), repr(t.out[-400:]))
+    # nimhubd runs with -d, so it logs every client frame
+    with d.cond:
+        frames = [line for line in d.lines[log_start:] if "client" in line and " < " in line]
+    check("interactive: the bar uses watch, no status polling (D-R21)",
+          any('"cmd":"watch"' in f for f in frames)
+          and not any('"cmd":"status"' in f for f in frames), "\n".join(frames))
 
     # The user's own lease: shown in the bar, renewed in the background
     other = cd.Client(b.socket)
@@ -268,7 +276,7 @@ def main():
         if d.wait_for("handshake: done") is None:
             sys.exit("nimhubd didn't start:\n" + d.dump())
         batch_checks(b)
-        interactive_checks(b)
+        interactive_checks(b, d)
     finally:
         d.stop()
         dummy.stop()

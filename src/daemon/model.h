@@ -39,6 +39,10 @@ typedef struct {
     // step 13), and are lost when nimhubd stops.
     bool has_setting[MODEL_SETTINGS];
     int32_t setting[MODEL_SETTINGS];
+    // The state last sent to watching clients (D-R21)
+    bool sent;
+    int32_t sent_pos;
+    bool sent_pos_valid, sent_moving, sent_locked;
 } model_device_t;
 
 typedef struct {
@@ -83,5 +87,10 @@ void model_enabled(model_device_t *d, bool enabled);
 
 // The link is down (D-R30): every position void
 void model_link_down(model_t *m);
+
+// True if d's reported state (pos, pos_valid, moving, locked) has changed
+// since the last call that returned true, which is then the new reference.
+// False until get_state has filled it.
+bool model_take_change(model_device_t *d);
 
 #endif

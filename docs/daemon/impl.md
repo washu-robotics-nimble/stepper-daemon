@@ -118,7 +118,7 @@ Typed lines (`parse.c`):
 
 Interactive mode (`main.c`):
 - One `poll()` loop for the terminal and the socket. linenoise is used through its multiplexing API (`linenoiseEditStart` / `Feed` / `Stop`, `linenoiseHide` / `Show`), so the bar keeps updating while a line is being typed.
-- The bar sits on the line below the prompt and is repainted with cursor save / restore, as in the old `src/cli.c`. Every 250 ms it sends `status` for each motor from `devices` (polling until `watch`, step 12). It shows `m0 400 (invalid) idle free`, teal while a motor moves, red for `link down` or `nimhubd not running`.
+- The bar sits on the line below the prompt and is repainted with cursor save / restore, as in the old `src/cli.c`. Every 250 ms it sends `status` for each motor from `devices` (polling until `watch`, step 12; since step 12 it follows `status` events instead, below). It shows `m0 400 (invalid) idle free`, teal while a motor moves, red for `link down` or `nimhubd not running`.
 - When the socket is gone, the CLI reconnects every second.
 - Tab completes commands and device names. History is kept for the session only.
 - Ctrl-C with something typed drops the line; Ctrl-D, or Ctrl-C on an empty line, quits.
@@ -159,6 +159,22 @@ Tests:
 - `tests/check_cli.py` adds the automatic lease, a write refused while another client holds the lease, the user's own lease in stdin mode (renewed before commands when lines come slower than the lease), and its background renewal in interactive mode.
 - `tests/test_cli_parse.c` checks the write classification.
 
+Build plan step 12 (2026-11-02): `watch` / `unwatch` and `status` events (D-R20–D-R22); the CLI's bar follows them instead of polling.
+
+Daemon (`commands.c`, `model.c`, `main.c`):
+- `commands.c` keeps the watching clients by server slot and generation; a disconnect ends the watch.
+- `watch` replies, then sends that client a `status` event for every stepper whose state is known. `unwatch` stops the events.
+- Each model device remembers the state last broadcast. `model_take_change()` compares it with the current state, and `commands_broadcast()` sends one event per changed device to every watcher. Several fields changing at once (`move_end`: `pos` and `moving`) give one event.
+- `commands_broadcast()` runs after every firmware event (`on_event()` in `main.c`) and after every firmware reply to a client command (after that reply is sent, so the sender gets the reply first). It also runs once per main loop pass, which catches the handshake's `get_state`: a client that watched before the handshake was done gets every device's state then.
+- An accepted `move` sets `moving` at once (step 9), so the event for the start of a move comes with the reply, and `move_start` changes nothing after it. A `position` event with an unchanged `pos` sends nothing.
+- `status` replies and events share `add_state()`, so they have the same fields.
+
+nimhub-cli: after `devices` succeeds, it sends `watch`, and the bar follows the `status` events, which aren't printed in interactive mode. `devices` is retried every 250 ms while nimhubd has no MCU yet (`link_down`). In one-shot and stdin mode, events are printed like any other line.
+
+Tests:
+- `tests/check_daemon.py`: the snapshot after `watch` (the same as `status`), silence while nothing changes, one event per change through a move (moving first, growing positions, the end at the target, no two in a row the same), `zero`, `lock`, `unlock`, nothing for a command that changes nothing, `watch` again, `unwatch`, and watching before the handshake is done.
+- `tests/check_cli.py`: the bar follows a move, and nimhubd's log shows the CLI's `watch` and no `status` requests from it.
+
 | Module | Role today | Fate in the new architecture |
 |---|---|---|
 | `src/main.c` | Loads config, starts the motor thread, runs the CLI in-process | Becomes the daemon entry point: daemonise, open link, serve clients. Superseded by `src/daemon/main.c` (step 8), which runs in the foreground (systemd, step 14) |
@@ -166,7 +182,7 @@ Tests:
 | `src/motor.h` | The `motor_*` API (`src/motor.c`, the lg GPIO + `lgTxPulse` motion thread, is removed) | Implemented by a link client that translates `motor_*` calls into host-link messages. The public `motor_*` API is the seam to preserve |
 | `src/ramp.c` | Removed | The firmware computes ramps itself (F-R5, `src/firmware/planner.c`) |
 | `src/command.c` | Parse and run text commands | Kept as the shared command layer for all clients (D-R11). Parses JSON requests instead of text lines (D-R40, D-R41), and gains each command's class (D-R13). `help` and `quit` move to the CLI. Superseded by `src/daemon/commands.c` (step 9); the command classes come with the lease (step 11), and are there since |
-| `src/status.c` | Snapshot and change tracking | Kept. Snapshots fill from firmware reports instead of local atomics (D-R20). The snapshot part is `src/daemon/model.c` since step 9; change tracking comes with `watch` (step 12) |
+| `src/status.c` | Snapshot and change tracking | Kept. Snapshots fill from firmware reports instead of local atomics (D-R20). The snapshot part is `src/daemon/model.c` since step 9; change tracking comes with `watch` (step 12), and is `model_take_change()` since |
 | `src/cli.c` | stdin CLI with a status bar | Becomes the interactive CLI client, a separate program on the Unix socket (D-R12, D-R15). Translates typed lines into JSON requests; the user always names the device (D-R14). Acquires the lease just before a write command and releases it right after the reply (D-R18). Superseded by `src/cli/` (`nimhub-cli`, step 10), with the lease handling since step 11 |
 | `src/motordriver.c`, `lib/lg/` | Removed (lg PWM experiment; vendored lg) | - |
 
@@ -177,7 +193,7 @@ Not designed in detail yet. Expected pieces:
 
 - Link layer: JSON framing, `seq` matching, response timeout, and report decoding for the host link. Emergency stop skips the outgoing queue. Reconnects with exponential backoff (250 ms doubling to 2 s). Implements D-R1, D-R17, D-R30, D-R31. Since step 8: `src/daemon/link.c` and `serial.c`, without the estop queue jump (step 14) and reconnects (step 13).
 - Machine model: the latest firmware-reported state for each device. This is the only source for `status_capture` (D-R20, D-R22). Converts HX711 raw counts to mg with the INI `scale` and `offset`. Since step 9: `src/daemon/model.c`, steppers only.
-- Client server: a Unix socket listener feeding one dispatch path through `command.c`, plus `status` events to watching clients (D-R10–D-R12, D-R15, D-R19, D-R21, D-R40–D-R43). Since step 9: `src/daemon/server.c` and `commands.c`, without `watch` (step 12).
+- Client server: a Unix socket listener feeding one dispatch path through `command.c`, plus `status` events to watching clients (D-R10–D-R12, D-R15, D-R19, D-R21, D-R40–D-R43). Since step 9: `src/daemon/server.c` and `commands.c`, without `watch` (step 12; there since).
 - Lease arbiter: checks each command's class against the current lease, and handles expiry and disconnects (D-R13, D-R16–D-R18). Since step 11: `src/daemon/lease.c`.
 
 Dependencies: libc, inih, and cJSON (client protocol D-R40 and host link F-R31). Since step 8, also rxi/log.c.
@@ -191,7 +207,8 @@ Dependencies: libc, inih, and cJSON (client protocol D-R40 and host link F-R31).
 - SIGINT / SIGTERM close the link without stopping motion first (D-R2; step 14). The firmware stops it anyway, as a link loss (F-R22).
 - Exclusive use (D-R1): the `/proc` scan only sees the processes of nimhubd's own user unless it runs as root, and `TIOCEXCL` doesn't keep root out.
 - A key a device section leaves out keeps whatever the firmware has. If the firmware wasn't reset, that can be a value set by an earlier daemon session, not the board table's default.
-- ~~No lease yet: every client may write (D-R13, D-R16–D-R18; step 11).~~ Done in step 11. Events don't reach clients yet (D-R21; step 12).
+- ~~No lease yet: every client may write (D-R13, D-R16–D-R18; step 11).~~ Done in step 11. ~~Events don't reach clients yet (D-R21; step 12).~~ Done in step 12.
+- Fault state (D-R20) isn't reported to clients; the firmware's `fault` events are only logged (step 16, with `home_timeout`).
 - An event with `settings_applied` false (a firmware reset, D-R30) isn't acted on yet (step 13).
 - ~~nimhub-cli doesn't handle the lease yet.~~ Done in step 11.
 - ~~Without `zero` (step 11) there is no way to make a position valid through nimhubd, so `abs` only works after a valid position from an earlier session (e.g. one set with `tests/hostlink.py` before nimhubd started).~~ `zero` exists since step 11.

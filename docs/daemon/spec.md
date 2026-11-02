@@ -135,11 +135,20 @@ Commands without `dev`.
 | Command | Class | Effect | Errors |
 |---|---|---|---|
 | `lease` / `renew` / `release` | session | Acquire, keep or give up the lease (D-R18). `lease` takes it, or renews it if the sender holds it already; `renew` needs the sender to hold it (not expired). Both return `timeout_ms`, how long it is held without renewal. `release` frees it if the sender holds it, and otherwise does nothing; it always succeeds | lease held (by another client; for `renew`, also when the sender doesn't hold it) |
-| `watch` / `unwatch` | read | Subscribe to or unsubscribe from `status` events (D-R21) | n/a |
+| `watch` / `unwatch` | read | Subscribe to or unsubscribe from `status` events (D-R21). After the `watch` reply, one `status` event per device with its current state, then one whenever it changes; a device not known yet (handshake not done) gets its first one when it becomes known. Both can be repeated; `watch` again sends the current state again | n/a |
 | `devices` | read | List the devices (D-R43). Returns `devices`, a list of `{"dev":oid,"type":type}` in the firmware's order | link down |
 | `estop` | emergency | Stop everything now (F-R24) | n/a |
 
 Client-local commands such as `help` and `quit` are not part of the protocol.
+
+### Events
+
+| `evt` | Fields | Sent |
+|---|---|---|
+| `status` | `dev`, and the fields of a `status` reply: `pos`, `pos_valid`, `moving`, `locked` | To watching clients (D-R21): after `watch`, and once per change of a device's state; several fields changing together give one event (D-R22). A client whose command changed the state gets the command's reply first |
+| `bad_request` | `msg` | To the client whose line couldn't be read (D-R40) |
+
+Fault state (D-R20) is not reported yet: TBD, with `home_timeout` (build plan step 16).
 
 ## State reporting
 

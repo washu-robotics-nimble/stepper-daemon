@@ -140,8 +140,9 @@ Questions are at the end; answer them as before.
 
 - `watch` / `unwatch`; `status` events built from firmware reports only, one snapshot per event (D-R20–D-R22).
 - The CLI status bar switches from polling to `watch`.
+- After `watch`, the current state of every device comes first (decided 2026-11-02). Fault state is left for step 16.
 
-**Test:** `dummy_mcu.py` sends scripted events; a watching client gets exactly one consistent `status` event per change.
+**Test:** `dummy_mcu.py` sends scripted events; a watching client gets exactly one consistent `status` event per change. The dummy's moves give the events; nothing else was scripted. Also checked on the Pico, USB only.
 
 ### 13. Link failure and reconnect
 
