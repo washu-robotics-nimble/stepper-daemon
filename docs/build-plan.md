@@ -117,8 +117,9 @@ Questions are at the end; answer them as before.
 
 ### 10. CLI client (**MVP milestone 2**)
 
-- `src/cli/` (`stepper-cli`): typed lines (`m0 rel 400`) become JSON requests. The device is always named (D-R14). `help` and `quit` are local.
+- `src/cli/` (`nimhub-cli`, named `stepper-cli` until 2026-11-02): typed lines (`m0 rel 400`) become JSON requests. The device is always named (D-R14). `help` and `quit` are local.
 - The status bar is driven by polling `status` for now.
+- nimhubd gains `devices`, so the CLI can find the devices (D-R43).
 
 **Test:** interactive session against the Pico. Moves show on the analyzer, and the status bar follows.
 

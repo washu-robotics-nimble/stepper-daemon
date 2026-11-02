@@ -2,21 +2,24 @@
 
 This repository holds firmware for a hardware control board, and code for the daemon to interface with it from a Linux host.
 
-- An RP2040 board (e.g. a Raspberry Pi Pico) runs the firmware in `src/firmware/`: it generates the step pulses on its PIO, with trapezoid ramps, and talks to the host over USB (CDC serial, newline-delimited JSON).
-- A Linux daemon, `nimhubd` (`src/daemon/`), owns that link. It will serve clients over a Unix socket, with a CLI client on top; for now it connects, configures the board and keeps the link alive.
+The firmware runs on a RP2040-based board to handle all hardware modules. It communicates with the host over USB CDC.
 
-Design documents are in `docs/` (start with `docs/README.md`); the build plan is `docs/build-plan.md`.
+A Linux daemon, `nimhubd` (`src/daemon/`) exclusively owns the link. It configures all hardware on init, and serves clients over a Unix socket. Current clients include:
+    - `nimhub-cli` (`src/cli/`): the command-line client, with a live status bar.
+    - *TBD*: Python client that can be integrated with other programs.
+
+Design documents are in `docs/` (start with `docs/README.md`).
 
 # Build
 
 ```shell
-# The daemon, build/nimhubd (gcc):
+# The daemon and the CLI, build/nimhubd and build/nimhub-cli (gcc):
 make
 
 # Host unit tests:
 make test
 
-# The daemon against a dummy MCU on a pty, no board needed (Python 3):
+# Both against a dummy MCU on a pty, no board needed (Python 3):
 make check-daemon
 
 # Firmware (Pico SDK 2.x, arm-none-eabi-gcc, cmake):
@@ -40,7 +43,14 @@ build/nimhubd -d nimhub.ini    # -d: also log every frame
 
 Copy `nimhub.ini` and set `device` in `[daemon]` to the board's `/dev/serial/by-id/<board>`. Without a CONFIG argument, nimhubd reads `/etc/nimhubd/nimhub.ini`, or, if that doesn't exist, `~/.config/nimhubd/nimhub.ini` (handy for testing without write access to `/etc`). It runs in the foreground and logs to stderr; stop it with Ctrl-C.
 
-Clients connect to the Unix socket set by `socket` in `[daemon]` (default `/run/nimhubd/control.sock`, whose directory systemd creates). When running nimhubd by hand, point `socket` at a writable place, e.g. `<runtime-dir>/control.sock`. Requests are JSON lines (`docs/daemon/spec.md`, Client protocol):
+Clients connect to the Unix socket set by `socket` in `[daemon]` (default `/run/nimhubd/control.sock`, whose directory systemd creates). When running nimhubd by hand, point `socket` at a writable place, e.g. `<runtime-dir>/control.sock`.
+
+```shell
+build/nimhub-cli -s <runtime-dir>/control.sock              # interactive, with a status bar
+build/nimhub-cli -s <runtime-dir>/control.sock m0 rel 400   # one command, then exit
+```
+
+Type `help` in the CLI for its commands. Requests are JSON lines (`docs/daemon/spec.md`, Client protocol), so any client works, e.g.:
 
 ```shell
 socat - UNIX-CONNECT:<runtime-dir>/control.sock
@@ -53,9 +63,15 @@ Without the board, `tests/dummy_mcu.py --link <path>` makes a dummy MCU on a pty
 # Status
 
 - [x] Firmware, one stepper: moves with trapezoid ramps, stop, emergency stop, settings and state, soft limits, link-loss handling
-- [ ] Daemon: link, handshake, settings, and the client socket with `status`, `pos`, `rel`, `abs`, `stop`, `estop` done; lease and `watch` to come
-- [ ] CLI client
+- [ ] Daemon: link, handshake, settings, and the client socket with `devices`, `status`, `pos`, `rel`, `abs`, `stop`, `estop` done; lease and `watch` to come
+- [x] CLI client (lease handling comes with the lease)
 - [ ] Endstop and homing
 - [ ] HX711 load cell
 
-`src/*.c` (directly in `src/`) is the pre-migration code (it drove the A4988 from a Raspberry Pi's GPIO through the `lg` library). It no longer builds, and is the starting point for the daemon.
+# License
+
+MIT.
+
+# Old code
+
+This project *was* designed to interface hardware from a Raspberry Pi 4 through the `lg` library. This is no longer the intent, and legacy code is in `src/*.c` (does not build).

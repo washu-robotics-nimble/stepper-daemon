@@ -241,8 +241,29 @@ static void cmd_estop(const request_t *r)
     forward(r, link_new_request("estop", NULL), FW_ESTOP);
 }
 
+// The devices the firmware reported (D-R43), for clients to discover them
+static void cmd_devices(const request_t *r)
+{
+    const model_t *m = r->c->model;
+
+    if (r->c->hs->status != HANDSHAKE_READY) {
+        reply_error(r, "link_down", "the MCU isn't connected and configured");
+        return;
+    }
+    cJSON *reply = new_reply(r->seq, true);
+    cJSON *list = cJSON_AddArrayToObject(reply, "devices");
+    for (size_t i = 0; i < m->count; i++) {
+        cJSON *d = cJSON_CreateObject();
+        cJSON_AddStringToObject(d, "dev", m->devices[i].oid);
+        cJSON_AddStringToObject(d, "type", m->devices[i].type);
+        cJSON_AddItemToArray(list, d);
+    }
+    send_reply(r->c, r->client, reply);
+}
+
 static const command_t daemon_commands[] = {
     {"estop",   cmd_estop},
+    {"devices", cmd_devices},
     {"lease",   NULL},
     {"renew",   NULL},
     {"release", NULL},

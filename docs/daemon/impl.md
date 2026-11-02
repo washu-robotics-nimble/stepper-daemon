@@ -70,7 +70,7 @@ Socket (`server.c`):
 
 Commands (`commands.c`):
 - The envelope: a line that isn't a JSON object, or has no `seq` that is an integer in uint32 range, gets a `bad_request` event (also for an over-length line, or one with a NUL byte). With a `seq` but no string `cmd`, or a `dev` that isn't a string, the reply is `bad_request`.
-- Without `dev`: daemon commands (`estop`; `lease`, `renew`, `release`, `watch`, `unwatch` are `not_impl`). A device command without `dev` is `unknown_cmd`. `estop` goes to the firmware whenever the link is up, even during the handshake.
+- Without `dev`: daemon commands (`estop`; `devices` since step 10, `link_down` until the handshake is done; `lease`, `renew`, `release`, `watch`, `unwatch` are `not_impl`). A device command without `dev` is `unknown_cmd`. `estop` goes to the firmware whenever the link is up, even during the handshake.
 - With `dev`: `link_down` until the handshake is done; then `unknown_dev` for an `oid` the firmware didn't list, and `unknown_cmd` for a command its type doesn't have. Motor: `rel` → `move`, `abs` → `move_to`, `stop` → `stop`; `pos` and `status` come from the model. `speed`, `accel`, `micro`, `zero`, `home`, `lock` and `unlock` are `not_impl`.
 - `abs` with the position invalid is `pos_invalid`, without asking the firmware: the firmware checks that only when soft limits are set (F-R25).
 - A command that goes to the firmware replies from the firmware's reply. Its errors keep their code (`busy`, `bad_param`, `pos_invalid`, `not_moving`), except `unknown_oid` → `unknown_dev` and `not_configured` → `link_down`. If the link goes down first, the reply is `link_down`: the link layer then calls every waiting request's callback with no reply.
@@ -92,6 +92,42 @@ Tests: `tests/check_daemon.py` adds the client checks:
 
 `dummy_mcu.py --pos-valid` starts its steppers with a valid position, for `abs`.
 
+Build plan step 10 (2026-11-02): the CLI client, `nimhub-cli` (planned as `stepper-cli`), in `src/cli/`, built to `build/nimhub-cli`. It is a separate process on the socket (D-R15) and uses only the client protocol (D-R11). nimhubd gained the `devices` command, so clients can find the devices (D-R43).
+
+| File | Role |
+|---|---|
+| `main.c` | Command line `nimhub-cli [-s SOCKET] [COMMAND ...]` (default socket `/run/nimhubd/control.sock`, no fallback), the three modes, and the status bar |
+| `parse.c` / `.h` | Typed lines to requests. Pure C |
+| `conn.c` / `.h` | The socket connection and its line framing |
+
+Dependencies: cJSON, and linenoise (`lib/linenoise/`, BSD-2-Clause, commit `a473823`, unchanged) for line editing, history and tab completion.
+
+Modes:
+- One-shot: `nimhub-cli m0 rel 400` sends that one command, prints the reply and exits. Options end at the first word, so `m0 rel -100` works.
+- Stdin: with stdin not a terminal, one command per line.
+- Interactive: on a terminal with no command.
+- Replies and events are printed as nimhubd sends them, one JSON line each. Local errors go to stderr, except in interactive mode.
+- The exit status is 1 if any command failed (an error reply, a `bad_request` event, a local error, no reply within 3 s, or no connection).
+
+Typed lines (`parse.c`):
+- `<dev> <cmd> [arg]` is a device command (D-R14). The argument goes into `steps` for `rel`, `pos` for `abs`, and `value` for any other command; it is sent as a number if it reads as one, else as a string.
+- A single word is a daemon command (`estop`, `devices`, ...).
+- A line starting with `{` is sent as raw JSON, with `seq` added if it has none; a `seq` it has is kept, and its reply is matched by it.
+- `help` and `quit` are local.
+- Anything else goes out as typed, and nimhubd decides (`unknown_cmd`, `not_impl`, `bad_param`), so the CLI stays thin.
+
+Interactive mode (`main.c`):
+- One `poll()` loop for the terminal and the socket. linenoise is used through its multiplexing API (`linenoiseEditStart` / `Feed` / `Stop`, `linenoiseHide` / `Show`), so the bar keeps updating while a line is being typed.
+- The bar sits on the line below the prompt and is repainted with cursor save / restore, as in the old `src/cli.c`. Every 250 ms it sends `status` for each motor from `devices` (polling until `watch`, step 12). It shows `m0 400 (invalid) idle free`, teal while a motor moves, red for `link down` or `nimhubd not running`.
+- When the socket is gone, the CLI reconnects every second.
+- Tab completes commands and device names. History is kept for the session only.
+- Ctrl-C with something typed drops the line; Ctrl-D, or Ctrl-C on an empty line, quits.
+- While a request waits for its reply (up to 3 s), there is no prompt.
+
+Tests:
+- `tests/test_cli_parse.c` (part of `make test`) checks the parser.
+- `tests/check_cli.py` (also run by `make check-daemon`) runs nimhub-cli through nimhubd and the dummy: one-shot and stdin mode, and a short interactive session on a pty (bar, a move, tab completion, quitting). How the bar looks is checked by hand.
+
 | Module | Role today | Fate in the new architecture |
 |---|---|---|
 | `src/main.c` | Loads config, starts the motor thread, runs the CLI in-process | Becomes the daemon entry point: daemonise, open link, serve clients. Superseded by `src/daemon/main.c` (step 8), which runs in the foreground (systemd, step 14) |
@@ -100,7 +136,7 @@ Tests: `tests/check_daemon.py` adds the client checks:
 | `src/ramp.c` | Removed | The firmware computes ramps itself (F-R5, `src/firmware/planner.c`) |
 | `src/command.c` | Parse and run text commands | Kept as the shared command layer for all clients (D-R11). Parses JSON requests instead of text lines (D-R40, D-R41), and gains each command's class (D-R13). `help` and `quit` move to the CLI. Superseded by `src/daemon/commands.c` (step 9); the command classes come with the lease (step 11) |
 | `src/status.c` | Snapshot and change tracking | Kept. Snapshots fill from firmware reports instead of local atomics (D-R20). The snapshot part is `src/daemon/model.c` since step 9; change tracking comes with `watch` (step 12) |
-| `src/cli.c` | stdin CLI with a status bar | Becomes the interactive CLI client, a separate program on the Unix socket (D-R12, D-R15). Translates typed lines into JSON requests; the user always names the device (D-R14). Acquires the lease just before a write command and releases it right after the reply (D-R18) |
+| `src/cli.c` | stdin CLI with a status bar | Becomes the interactive CLI client, a separate program on the Unix socket (D-R12, D-R15). Translates typed lines into JSON requests; the user always names the device (D-R14). Acquires the lease just before a write command and releases it right after the reply (D-R18). Superseded by `src/cli/` (`nimhub-cli`, step 10); the lease handling comes with step 11 |
 | `src/motordriver.c`, `lib/lg/` | Removed (lg PWM experiment; vendored lg) | - |
 
 
@@ -126,4 +162,5 @@ Dependencies: libc, inih, and cJSON (client protocol D-R40 and host link F-R31).
 - A key a device section leaves out keeps whatever the firmware has. If the firmware wasn't reset, that can be a value set by an earlier daemon session, not the board table's default.
 - No lease yet: every client may write (D-R13, D-R16–D-R18; step 11). Events don't reach clients yet (D-R21; step 12).
 - An event with `settings_applied` false (a firmware reset, D-R30) isn't acted on yet (step 13).
+- nimhub-cli doesn't handle the lease yet. With step 11, it takes the lease just before each write command and releases it after the reply, so users never handle it by hand (D-R18).
 - Without `zero` (step 11) there is no way to make a position valid through nimhubd, so `abs` only works after a valid position from an earlier session (e.g. one set with `tests/hostlink.py` before nimhubd started).

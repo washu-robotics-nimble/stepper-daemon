@@ -134,6 +134,7 @@ Commands without `dev`.
 |---|---|---|---|
 | `lease` / `renew` / `release` | session | Acquire, keep or give up the lease | lease held by another client |
 | `watch` / `unwatch` | read | Subscribe to or unsubscribe from `status` events (D-R21) | n/a |
+| `devices` | read | List the devices (D-R43). Returns `devices`, a list of `{"dev":oid,"type":type}` in the firmware's order | link down |
 | `estop` | emergency | Stop everything now (F-R24) | n/a |
 
 Client-local commands such as `help` and `quit` are not part of the protocol.

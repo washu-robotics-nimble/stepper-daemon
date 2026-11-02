@@ -425,6 +425,10 @@ def client_checks(b):
               acked(st) and st.get("seq") == 1 and st.get("pos") == 0
               and st.get("pos_valid") is False and st.get("moving") is False
               and st.get("locked") is False, str(st))
+        r = c.call("devices")
+        check("devices: the firmware's objects, in order",
+              acked(r) and r.get("devices") == [{"dev": "m0", "type": "stepper"},
+                                                {"dev": "m1", "type": "stepper"}], str(r))
         p = c.call("pos", "m0")
         check("pos: pos and pos_valid", acked(p) and p.get("pos") == 0
               and p.get("pos_valid") is False and "moving" not in p, str(p))
@@ -611,6 +615,8 @@ def client_checks(b):
     c = Client(b.socket)
     r = c.call("status", "m0")
     check("before the handshake is done: link_down", err(r, "link_down"), str(r))
+    r = c.call("devices")
+    check("devices before the handshake is done: link_down", err(r, "link_down"), str(r))
     c.close()
     d.stop()
     dummy.stop()
