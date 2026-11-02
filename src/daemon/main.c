@@ -148,6 +148,39 @@ static void went_up(commands_t *c)
     commands_broadcast(c);
 }
 
+// Stopping on SIGTERM / SIGINT (D-R2): stop sent, waiting for move_end; 0:
+// not stopping
+#define STOP_WAIT_MS 2000
+static uint64_t stopping_until;
+
+static bool any_moving(void)
+{
+    for (size_t i = 0; i < model.count; i++)
+        if (model_is_stepper(&model.devices[i]) && model.devices[i].moving)
+            return true;
+    return false;
+}
+
+// stop for every moving axis, as the firmware last reported it; returns how
+// many were sent. Their move_end events end the wait.
+static size_t stop_motion(void)
+{
+    size_t n = 0;
+
+    if (!conn.ready || !link_up(&mcu))
+        return 0;
+    for (size_t i = 0; i < model.count; i++) {
+        const model_device_t *d = &model.devices[i];
+        if (!model_is_stepper(d) || !d->moving)
+            continue;
+        cJSON *req = link_new_request("stop", d->oid);
+        if (link_request(&mcu, req, NULL, NULL))
+            n++;
+        cJSON_Delete(req);
+    }
+    return n;
+}
+
 // Follow the link and the handshake: drop, or tell clients it is up
 static void update(commands_t *c)
 {
@@ -273,6 +306,12 @@ int main(int argc, char *argv[])
             now = monotonic_ms();
             timeout = conn.next_attempt <= now ? 0 : (int)(conn.next_attempt - now);
         }
+        if (stopping_until != 0) {
+            now = monotonic_ms();
+            int left = stopping_until <= now ? 0 : (int)(stopping_until - now);
+            if (timeout < 0 || left < timeout)
+                timeout = left;
+        }
         struct timespec ts = {.tv_sec = timeout / 1000, .tv_nsec = (timeout % 1000) * 1000000L};
         struct pollfd pfds[2 + SERVER_MAX_CLIENTS];
         // A closed device is fd -1, which poll() skips
@@ -287,10 +326,21 @@ int main(int argc, char *argv[])
             break;
         }
         if (stop_signal != 0) {
-            // Stopping motion first comes with build plan step 14 (D-R2);
-            // closing the port stops it too, as a link loss (F-R22)
-            log_info("%s: closing the link", strsignal(stop_signal));
-            break;
+            int sig = stop_signal;
+            stop_signal = 0;
+            // A second signal while stopping: out at once
+            if (stopping_until != 0) {
+                log_info("%s again: closing the link now", strsignal(sig));
+                break;
+            }
+            // D-R2: stop motion first, then close the link
+            size_t n_stops = stop_motion();
+            if (n_stops == 0) {
+                log_info("%s: closing the link", strsignal(sig));
+                break;
+            }
+            log_info("%s: stopping %zu axis(es), then closing the link", strsignal(sig), n_stops);
+            stopping_until = monotonic_ms() + STOP_WAIT_MS;
         }
         if (n > 0) {
             if (conn.fd >= 0)
@@ -304,6 +354,19 @@ int main(int argc, char *argv[])
         // Before the broadcast, so link_up comes ahead of the state
         update(&commands);
         commands_broadcast(&commands);
+
+        // Stopping: done once no axis moves, the link is gone, or the wait
+        // is over
+        if (stopping_until != 0) {
+            if (!any_moving()) {
+                log_info("motion stopped: closing the link");
+                break;
+            }
+            if (!conn.ready || monotonic_ms() >= stopping_until) {
+                log_warn("motion not confirmed stopped: closing the link anyway");
+                break;
+            }
+        }
     }
 
     server_close(&server);

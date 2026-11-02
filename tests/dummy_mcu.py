@@ -485,17 +485,38 @@ class DummyMCU:
 
     # ---- main loop ----
 
+    @staticmethod
+    def is_estop(line):
+        try:
+            req = json.loads(line)
+        except ValueError:
+            return False
+        return isinstance(req, dict) and req.get("cmd") == "estop"
+
     def receive(self, data, now):
         self.rx += data
+        lines = []      # complete lines; None: an over-length one
         while True:
             line, nl, rest = self.rx.partition(b"\n")
             if not nl:
                 break
             self.rx = rest
             if self.rx_too_long or len(line) + 1 > LINE_MAX:
-                self.log("<", f"({len(line)} bytes, over-length)")
                 self.rx_too_long = False
+                lines.append(None)
+            else:
+                lines.append(line)
+        # F-R24: an estop runs as soon as its line is complete, ahead of the
+        # lines received before it and still queued
+        for line in [x for x in lines if x is not None and self.is_estop(x)]:
+            self.handle_line(line, now)
+            self.poll(now)
+        for line in lines:
+            if line is None:
+                self.log("<", "(over-length line)")
                 self.rx_error("too_long")
+            elif self.is_estop(line):
+                continue
             else:
                 self.handle_line(line, now)
             self.poll(now)

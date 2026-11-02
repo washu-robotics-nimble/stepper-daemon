@@ -23,7 +23,7 @@ Dependencies are vendored in `lib/`: inih, cJSON v1.7.19, and rxi/log.c (`lib/lo
 
 Config (`config.c`):
 - Default path `/etc/nimhubd/nimhub.ini`. If it doesn't exist, `$XDG_CONFIG_HOME/nimhubd/nimhub.ini` (`$XDG_CONFIG_HOME` defaults to `~/.config`) is used instead, for testing without write access to `/etc`. The sample is `nimhub.ini` at the top of the repository (`motor.ini` until 2026-11-02).
-- `[daemon]`: `device` (required), `socket` (default `/run/nimhubd/control.sock`, D-R12), `group` (default `stepper`); the last two are used from step 9. Since step 11 also `lease_timeout_ms` (default 5000, D-R18).
+- `[daemon]`: `device` (required), `socket` (default `/run/nimhubd/control.sock`, D-R12), `group` (default `stepper`, `nimhub` since step 14); the last two are used from step 9. Since step 11 also `lease_timeout_ms` (default 5000, D-R18).
 - `[link]`: `report_period` (default 250, F-R32), `timeout_ms` (the firmware's F-R22 timeout, default 0 = off), `reply_timeout_ms` (D-R30, default 500). `report_period` and `timeout_ms` are always sent, so none is left over from an earlier session.
 - Device sections: the key names are the `set_motion` fields: `microsteps`, `speed`, `accel`, `pulse_width_us`, `dir_polarity`, `soft_limit_min`, `soft_limit_max`, plus `endstop` (D-R44), which stays in the daemon. `default_speed` and `max_accel` were renamed to `speed` and `accel`, and `accel` must be at least 1 (there is no "0 = no ramp" any more).
 - Every value is checked when the file is loaded, against the firmware's ranges; an unknown key, a key set twice, or `soft_limit_min` above `soft_limit_max` is an error too. Every error is logged with its line, and the daemon doesn't start.
@@ -198,6 +198,43 @@ State after a command (2026-11-02, D-R20): the model changes only on firmware re
 - `stop` needs no refresh: its reply carries the end position, and `move_end` follows. `speed`, `accel` and `micro` change settings, not state.
 - `model_move_accepted()`, `model_estop()`, `model_zeroed()` and `model_enabled()` are gone.
 
+Build plan step 14 (2026-11-02): process behaviour (D-R2, D-R12, D-R17).
+
+Stopping (`main.c`, D-R2):
+- On the first SIGTERM / SIGINT, `stop_motion()` sends `stop` to every stepper the model reports moving. The loop then runs on until no stepper moves (their `move_end`), the link isn't up any more, or 2 s pass (logged as a warning).
+- With nothing moving, it closes at once. A second signal while waiting closes at once.
+- Then the socket and the device are closed.
+
+`estop` ahead of queued traffic (`link.c`, D-R17):
+- `link_request_urgent()` puts the frame ahead of every frame not yet written to the device. `tx_partial` records that the first frame in the buffer was cut short by a write, and that frame stays first.
+- The pending table has `LINK_URGENT_RESERVE` (4) extra slots that only urgent requests may use, so a full table never refuses an `estop`. `cmd_estop` sends through it.
+- The firmware then runs `estop` ahead of the lines it has queued (F-R24). `tests/dummy_mcu.py` does the same with the lines of one read.
+
+systemd and install (D-R12):
+- **Unit:** `systemd/nimhubd.service.in` becomes `nimhubd.service` at install time. It runs `nimhubd <CONFDIR>/nimhub.ini` with:
+  - `DynamicUser=yes`: no fixed account;
+  - `Group=nimhub`: the socket's group, without a `chown`;
+  - `SupplementaryGroups=dialout`: for `/dev/ttyACM*`;
+  - `RuntimeDirectory=nimhubd` (mode 0750): `/run/nimhubd/`;
+  - `TimeoutStopSec=5`: room for the 2 s stop;
+  - `Restart=on-failure`.
+- **Group:** `systemd/nimhub.sysusers` creates the `nimhub` group (named `stepper` until 2026-11-02, in D-R12 and the config default).
+- **`make install`** (`PREFIX` default `/usr/local`, `DESTDIR` for staging) installs the two programs, the unit (`$(PREFIX)/lib/systemd/system`), `sysusers.d/nimhub.conf` (`/etc/sysusers.d`), and `nimhub.ini` as `/etc/nimhubd/nimhub.ini` unless one exists. It then prints the next steps (`systemd-sysusers`, `systemctl daemon-reload`, `systemctl enable --now nimhubd`, `usermod -aG nimhub <user>`) rather than running them.
+- **`make uninstall`** removes what `make install` added, except the config and the group.
+
+Tests:
+- `tests/test_daemon_link.c` (`make test`):
+  - `estop` goes ahead of the frames waiting behind a full socket;
+  - it goes right after a partly written frame, not inside it;
+  - it passes a full pending table.
+- `tests/check_daemon.py`:
+  - SIGTERM while idle (out at once, no `stop`);
+  - SIGINT during a move (`stop`, then `move_end`, then the port closed, exit 0);
+  - an unanswered `stop` (gives up after the reply timeout);
+  - a second signal (out at once);
+  - the dummy's `estop` ordering.
+- `make install` / `uninstall` were tried into a staging `DESTDIR`, and `systemd-analyze verify` accepts the unit. The installed service itself is tested by hand: socket permissions, `systemctl stop` during a move, and `make uninstall`, all passed on the Pico on 2026-11-02.
+
 nimhub-cli: on `link_down` the bar shows "link down"; on `link_up` it asks for `devices` again and re-sends `watch`. Both events are printed.
 
 Tests:
@@ -228,7 +265,7 @@ Tests:
 
 Not designed in detail yet. Expected pieces:
 
-- Link layer: JSON framing, `seq` matching, response timeout, and report decoding for the host link. Emergency stop skips the outgoing queue. Reconnects with exponential backoff (250 ms doubling to 2 s). Implements D-R1, D-R17, D-R30, D-R31. Since step 8: `src/daemon/link.c` and `serial.c`, without the estop queue jump (step 14) and reconnects (step 13).
+- Link layer: JSON framing, `seq` matching, response timeout, and report decoding for the host link. Emergency stop skips the outgoing queue. Reconnects with exponential backoff (250 ms doubling to 2 s). Implements D-R1, D-R17, D-R30, D-R31. Since step 8: `src/daemon/link.c` and `serial.c`, without the estop queue jump (step 14) and reconnects (step 13); both there since.
 - Machine model: the latest firmware-reported state for each device. This is the only source for `status_capture` (D-R20, D-R22). Converts HX711 raw counts to mg with the INI `scale` and `offset`. Since step 9: `src/daemon/model.c`, steppers only.
 - Client server: a Unix socket listener feeding one dispatch path through `command.c`, plus `status` events to watching clients (D-R10–D-R12, D-R15, D-R19, D-R21, D-R40–D-R43). Since step 9: `src/daemon/server.c` and `commands.c`, without `watch` (step 12; there since).
 - Lease arbiter: checks each command's class against the current lease, and handles expiry and disconnects (D-R13, D-R16–D-R18). Since step 11: `src/daemon/lease.c`.
@@ -241,7 +278,7 @@ Dependencies: libc, inih, and cJSON (client protocol D-R40 and host link F-R31).
 - `soft_limit_min` and `soft_limit_max` are parsed but not enforced. Enforcement moves to the firmware (F-R25); the daemon only forwards them. Since step 8, nimhubd forwards them with `set_motion`.
 - The top-level `README.md` has a brief rewrite (2026-11-01) covering the firmware and host tests; it needs the daemon's build and run steps once they exist (build plan step 18). Since step 8, it has how to build and run nimhubd.
 - ~~A link drop ends nimhubd instead of reconnecting (D-R30, D-R31; step 13).~~ Done in step 13.
-- SIGINT / SIGTERM close the link without stopping motion first (D-R2; step 14). The firmware stops it anyway, as a link loss (F-R22).
+- ~~SIGINT / SIGTERM close the link without stopping motion first (D-R2; step 14). The firmware stops it anyway, as a link loss (F-R22).~~ Done in step 14.
 - Exclusive use (D-R1): the `/proc` scan only sees the processes of nimhubd's own user unless it runs as root, and `TIOCEXCL` doesn't keep root out.
 - A key a device section leaves out keeps whatever the firmware has. If the firmware wasn't reset, that can be a value set by an earlier daemon session, not the board table's default.
 - ~~No lease yet: every client may write (D-R13, D-R16–D-R18; step 11).~~ Done in step 11. ~~Events don't reach clients yet (D-R21; step 12).~~ Done in step 12.

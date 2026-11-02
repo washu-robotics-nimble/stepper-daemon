@@ -451,6 +451,94 @@ def wait_event(cl, name, timeout=5.0):
     return None
 
 
+def shutdown_checks(b):
+    """SIGTERM / SIGINT stop motion, then close the link (D-R2)"""
+    def start(*dummy_args):
+        dummy = Dummy(b.tty, *dummy_args)
+        d = b.daemon(b.ini(m0=M0_FREE))
+        d.wait_for("handshake: done")
+        c = Client(b.socket)
+        c.call("lease")
+        return dummy, d, c
+
+    # Idle: out at once, nothing sent
+    dummy, d, c = start()
+    rc = d.stop()
+    check("SIGTERM while idle: exits 0 at once, no stop sent",
+          rc == 0 and not any(f.get("cmd") == "stop" for f in dummy.received()), d.dump())
+    c.close()
+    dummy.stop()
+
+    # During a move: stop, wait for move_end, then close
+    dummy, d, c = start()
+    c.call("rel", "m0", steps=5000)
+    time.sleep(0.3)
+    t = time.monotonic()
+    rc = d.stop(signal.SIGINT)
+    took = time.monotonic() - t
+    frames = dummy.received()
+    stop_at = next((i for i, f in enumerate(frames) if f.get("cmd") == "stop"), None)
+    check("SIGINT during a move: stop sent, move_end awaited, exit 0",
+          rc == 0 and stop_at is not None and frames[stop_at].get("oid") == "m0"
+          and d.has("stopping 1 axis(es)") and d.has("motion stopped") and took < 1.5,
+          f"rc {rc}, {took:.2f} s\n" + d.dump())
+    check("...the port closed only after the stop",
+          dummy.wait_for("port closed", 1.0) is not None
+          and dummy.has('"evt":"move_end","oid":"m0"') and dummy.has('"reason":"stop"'))
+    c.close()
+    dummy.stop()
+
+    # The stop goes unanswered: the reply timeout ends the wait
+    dummy, d, c = start("--no-reply", "stop")
+    c.call("rel", "m0", steps=5000)
+    time.sleep(0.2)
+    t = time.monotonic()
+    rc = d.stop()
+    took = time.monotonic() - t
+    check("SIGTERM, stop unanswered: gives up after the reply timeout, exit 0",
+          rc == 0 and d.has("not confirmed stopped") and took < 1.5,
+          f"rc {rc}, {took:.2f} s\n" + d.dump())
+    c.close()
+    dummy.stop()
+
+    # A second signal while waiting: out at once
+    dummy, d, c = start("--no-reply", "stop")
+    c.call("rel", "m0", steps=5000)
+    time.sleep(0.2)
+    t = time.monotonic()
+    d.p.send_signal(signal.SIGTERM)
+    d.wait_for("stopping 1 axis(es)", 1.0)
+    d.p.send_signal(signal.SIGTERM)
+    rc = d.exit_code(1.0)
+    took = time.monotonic() - t
+    check("a second SIGTERM while stopping: exits at once",
+          rc == 0 and d.has("again: closing the link now") and took < 0.4,
+          f"rc {rc}, {took:.2f} s\n" + d.dump())
+    c.close()
+    dummy.stop()
+
+
+def dummy_estop_checks(b):
+    """The dummy MCU runs an estop ahead of lines received before it (F-R24),
+    as the firmware does; nimhubd's side (D-R17) is in test_daemon_link.c"""
+    dummy = Dummy(b.tty)
+    try:
+        fd = os.open(b.tty, os.O_RDWR | os.O_NOCTTY)
+        os.write(fd, b'{"seq":1,"cmd":"settings_done"}\n')
+        time.sleep(0.2)
+        # One write: a move, then an estop behind it
+        os.write(fd, b'{"seq":2,"cmd":"move","oid":"m0","steps":10}\n'
+                     b'{"seq":3,"cmd":"ping"}\n'
+                     b'{"seq":4,"cmd":"estop"}\n')
+        time.sleep(0.3)
+        os.close(fd)
+        order = [f.get("seq") for f in dummy.received()]
+        check("dummy MCU: estop handled ahead of the lines queued before it (F-R24)",
+              order == [1, 4, 2, 3], str(order))
+    finally:
+        dummy.stop()
+
+
 def reconnect_checks(b):
     """Link failure and reconnect (D-R30, D-R31), and the runtime settings
     re-sent after it (D-R3)"""
@@ -1022,6 +1110,8 @@ def main():
     failure_checks(b)
     client_checks(b)
     reconnect_checks(b)
+    shutdown_checks(b)
+    dummy_estop_checks(b)
     print(f"{failures} failure(s)" if failures else "all checks passed")
     sys.exit(min(failures, 125))
 

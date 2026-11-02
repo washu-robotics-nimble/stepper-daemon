@@ -297,7 +297,9 @@ static void forward_set(const request_t *r, cJSON *req, fw_kind_t kind,
     // Released in on_fw_reply(), which link_request() may call before it
     // returns
     server_hold(r->c->server, r->client);
-    bool sent = link_request(r->c->link, req, on_fw_reply, f);
+    // estop jumps the outgoing queue (D-R17)
+    bool sent = kind == FW_ESTOP ? link_request_urgent(r->c->link, req, on_fw_reply, f)
+                                 : link_request(r->c->link, req, on_fw_reply, f);
     cJSON_Delete(req);
     if (!sent) {
         free(f);

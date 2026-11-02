@@ -35,7 +35,9 @@ tests/check_commands.py /dev/serial/by-id/<board>   # checks every command
 
 Details, including `picotool` and the SDK version, are in `docs/firmware/impl.md`.
 
-# Run
+# Usage
+
+## Run
 
 ```shell
 build/nimhubd -d nimhub.ini    # -d: also log every frame
@@ -60,10 +62,34 @@ socat - UNIX-CONNECT:<runtime-dir>/control.sock
 
 Without the board, `tests/dummy_mcu.py --link <path>` makes a dummy MCU on a pty; point `device` at `<path>`.
 
+## Install (systemd)
+
+```shell
+sudo make install            # PREFIX=/usr/local by default
+# edit /etc/nimhubd/nimhub.ini: device = /dev/serial/by-id/<board>;
+# leave socket at /run/nimhubd/control.sock
+sudo systemd-sysusers        # creates the nimhub group
+sudo systemctl daemon-reload
+sudo systemctl enable --now nimhubd
+sudo usermod -aG nimhub <user>   # then log in again
+nimhub-cli                   # uses /run/nimhubd/control.sock
+```
+
+The service runs as a throwaway user (`DynamicUser=yes`) in groups `nimhub` (the socket's group, mode `0660`) and `dialout` (the board), and logs to the journal (`journalctl -u nimhubd`). `systemctl stop` stops any motion first. `sudo make uninstall` removes it all except `/etc/nimhubd/` and the group.
+
+## Uninstall
+
+```shell
+sudo make uninstall          # only removes binary and service
+sudo rm -r /etc/nimhubd      # wipes configuration
+sudo gpasswd -d $USER nimhub && sudo groupdel nimhub # Delete user and group
+sudo systemctl daemon-reload
+```
+
 # Status
 
 - [x] Firmware, one stepper: moves with trapezoid ramps, stop, emergency stop, settings and state, soft limits, link-loss handling
-- [ ] Daemon: link, handshake, settings, the client socket, the lease, every motor command but `home`, `watch`, and reconnecting done; systemd to come
+- [ ] Daemon: link, handshake, settings, the client socket, the lease, every motor command but `home`, `watch`, reconnecting, and the systemd service done
 - [x] CLI client, with automatic lease handling
 - [ ] Endstop and homing
 - [ ] HX711 load cell

@@ -209,7 +209,7 @@ static void set_defaults(config_t *cfg)
 {
     memset(cfg, 0, sizeof *cfg);
     strcpy(cfg->socket, "/run/nimhubd/control.sock");   // D-R12
-    strcpy(cfg->group, "stepper");
+    strcpy(cfg->group, "nimhub");
     cfg->lease_timeout_ms = 5000;   // D-R18
     cfg->report_period = 250;       // the firmware's defaults (F-R32, F-R22)
     cfg->timeout_ms = 0;

@@ -1,0 +1,3 @@
+# The group allowed to use nimhubd's client socket (D-R12). Installed as
+# sysusers.d/nimhub.conf by `make install`; created by systemd-sysusers.
+g nimhub -

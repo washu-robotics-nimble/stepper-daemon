@@ -69,7 +69,7 @@ static void test_defaults(void)
 {
     assert(parse("[daemon]\ndevice = /dev/x\n") == 0);
     assert(strcmp(cfg.socket, "/run/nimhubd/control.sock") == 0);
-    assert(strcmp(cfg.group, "stepper") == 0);
+    assert(strcmp(cfg.group, "nimhub") == 0);
     assert(cfg.lease_timeout_ms == 5000);
     assert(cfg.report_period == 250);
     assert(cfg.timeout_ms == 0);

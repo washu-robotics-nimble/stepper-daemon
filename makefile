@@ -64,7 +64,42 @@ build/tests/%: tests/%.c $(TEST_LIB) $(wildcard tests/*.h src/firmware/*.h)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Ilib/cJSON -Isrc/firmware -Itests -o $@ $< $(TEST_LIB) -lm
 
+# Installing (as root): the programs, the systemd unit, the nimhub group
+# (sysusers.d), and the sample config, which is never overwritten. DESTDIR
+# is for staging.
+PREFIX ?= /usr/local
+BINDIR ?= $(PREFIX)/bin
+UNITDIR ?= $(PREFIX)/lib/systemd/system
+SYSUSERSDIR ?= /etc/sysusers.d
+CONFDIR ?= /etc/nimhubd
+
+install: all
+	install -D -m 755 build/nimhubd $(DESTDIR)$(BINDIR)/nimhubd
+	install -D -m 755 build/nimhub-cli $(DESTDIR)$(BINDIR)/nimhub-cli
+	install -d $(DESTDIR)$(UNITDIR)
+	sed -e 's|@BINDIR@|$(BINDIR)|g' -e 's|@CONFDIR@|$(CONFDIR)|g' \
+	    systemd/nimhubd.service.in > $(DESTDIR)$(UNITDIR)/nimhubd.service
+	chmod 644 $(DESTDIR)$(UNITDIR)/nimhubd.service
+	install -D -m 644 systemd/nimhub.sysusers $(DESTDIR)$(SYSUSERSDIR)/nimhub.conf
+	@if [ -e $(DESTDIR)$(CONFDIR)/nimhub.ini ]; then \
+	    echo "kept the existing $(CONFDIR)/nimhub.ini"; \
+	else \
+	    install -D -m 644 nimhub.ini $(DESTDIR)$(CONFDIR)/nimhub.ini; \
+	fi
+	@echo
+	@echo "Next: edit $(CONFDIR)/nimhub.ini (device; leave socket at /run/nimhubd/control.sock), then"
+	@echo "  systemd-sysusers && systemctl daemon-reload && systemctl enable --now nimhubd"
+	@echo "and add yourself to the nimhub group: usermod -aG nimhub <user> (then log in again)"
+
+# Leaves the config and the nimhub group in place
+uninstall:
+	rm -f $(DESTDIR)$(BINDIR)/nimhubd $(DESTDIR)$(BINDIR)/nimhub-cli
+	rm -f $(DESTDIR)$(UNITDIR)/nimhubd.service $(DESTDIR)$(SYSUSERSDIR)/nimhub.conf
+	@echo
+	@echo "Kept: $(CONFDIR)/ and the nimhub group. If the service was enabled, first:"
+	@echo "  systemctl disable --now nimhubd; then systemctl daemon-reload"
+
 clean:
 	rm -rf build
 
-.PHONY: all check-daemon clean test
+.PHONY: all check-daemon clean install test uninstall

@@ -161,9 +161,13 @@ Questions are at the end; answer them as before.
 
 - SIGTERM/SIGINT stops motion, then closes the link (D-R2).
 - `estop` jumps the outgoing queue (D-R17).
-- systemd unit with `RuntimeDirectory=`, socket mode `0660`, group `stepper` (D-R12).
+- systemd unit with `RuntimeDirectory=`, socket mode `0660`, group `nimhub` (D-R12; `stepper` until 2026-11-02).
+- Decided 2026-11-02:
+  - on a signal, `stop` for each moving axis, then wait up to 2 s for `move_end`;
+  - the service runs with `DynamicUser=yes`, `Group=nimhub`, `SupplementaryGroups=dialout`;
+  - `make install` / `make uninstall`.
 
-**Test:** `systemctl stop` during a move stops the pulses. The socket permissions are correct. `estop` sent behind a burst of queued commands takes effect first (`dummy_mcu.py` logs arrival order).
+**Test:** `systemctl stop` during a move stops the pulses. The socket permissions are correct. `estop` sent behind a burst of queued commands takes effect first (`dummy_mcu.py` logs arrival order). nimhubd keeps at most 32 requests waiting, fewer than the pty's buffer holds, so the burst test became a unit test of the link's buffer (`tests/test_daemon_link.c`), plus the dummy running `estop` ahead of its received lines. The systemd checks are by hand, on the Pico; all passed on 2026-11-02.
 
 ---
 

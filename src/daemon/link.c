@@ -40,6 +40,7 @@ static void go_down(link_t *l, const char *fmt, ...)
             p.fn(p.ctx, NULL);
     }
     l->tx_len = 0;
+    l->tx_partial = false;
 }
 
 void link_close(link_t *l, const char *reason)
@@ -79,6 +80,9 @@ static void flush(link_t *l)
         }
         done += (size_t)n;
     }
+    // A frame cut short stays first, so an urgent one can't land inside it
+    if (done > 0)
+        l->tx_partial = done < l->tx_len && l->tx[done - 1] != '\n';
     memmove(l->tx, l->tx + done, l->tx_len - done);
     l->tx_len -= done;
 }
@@ -93,15 +97,15 @@ cJSON *link_new_request(const char *cmd, const char *oid)
     return req;
 }
 
-bool link_request(link_t *l, const cJSON *req, link_reply_fn fn, void *ctx)
+static bool request(link_t *l, const cJSON *req, link_reply_fn fn, void *ctx, bool urgent)
 {
     const cJSON *cmd = cJSON_GetObjectItemCaseSensitive(req, "cmd");
     const char *name = cJSON_IsString(cmd) ? cmd->valuestring : "?";
 
     if (!l->up)
         return false;
-    if (l->pending_count == LINK_MAX_PENDING) {
-        log_error("%s not sent: %d requests waiting for a reply", name, LINK_MAX_PENDING);
+    if (l->pending_count == LINK_MAX_PENDING + (urgent ? LINK_URGENT_RESERVE : 0)) {
+        log_error("%s not sent: %zu requests waiting for a reply", name, l->pending_count);
         return false;
     }
 
@@ -125,7 +129,16 @@ bool link_request(link_t *l, const cJSON *req, link_reply_fn fn, void *ctx)
 
     l->seq = seq;
     log_debug("> %.*s", len - 1, frame);
-    memcpy(l->tx + l->tx_len, frame, (size_t)len);
+    // Normally last in line; an urgent frame goes first, but after a frame
+    // already partly written (D-R17)
+    size_t at = l->tx_len;
+    if (urgent) {
+        at = 0;
+        if (l->tx_partial)
+            at = (size_t)((char *)memchr(l->tx, '\n', l->tx_len) - l->tx) + 1;
+        memmove(l->tx + at + len, l->tx + at, l->tx_len - at);
+    }
+    memcpy(l->tx + at, frame, (size_t)len);
     l->tx_len += (size_t)len;
     l->last_tx = monotonic_ms();
 
@@ -140,6 +153,16 @@ bool link_request(link_t *l, const cJSON *req, link_reply_fn fn, void *ctx)
 
     flush(l);
     return true;
+}
+
+bool link_request(link_t *l, const cJSON *req, link_reply_fn fn, void *ctx)
+{
+    return request(l, req, fn, ctx, false);
+}
+
+bool link_request_urgent(link_t *l, const cJSON *req, link_reply_fn fn, void *ctx)
+{
+    return request(l, req, fn, ctx, true);
 }
 
 // A reply: find its request. Replies come in request order, but a request

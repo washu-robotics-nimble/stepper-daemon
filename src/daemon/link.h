@@ -14,7 +14,8 @@
 #define LINK_FRAME_MAX   1024   // the firmware's line cap, including '\n'
 #define LINK_RX_MAX      4096   // longest line accepted from the MCU
 #define LINK_TX_MAX      16384  // frames waiting for the device to take them
-#define LINK_MAX_PENDING 32     // requests waiting for their reply
+#define LINK_MAX_PENDING 32     // requests waiting for their reply...
+#define LINK_URGENT_RESERVE 4   // ...plus slots only urgent ones (estop) may use
 
 // Called with the reply to a request (ack true or false), or with NULL if
 // the link went down first
@@ -41,11 +42,12 @@ typedef struct {
     link_event_fn on_event;
     void *event_ctx;
     size_t pending_count;
-    link_pending_t pending[LINK_MAX_PENDING];
+    link_pending_t pending[LINK_MAX_PENDING + LINK_URGENT_RESERVE];
     size_t rx_len;
     bool rx_overflow;           // dropping an over-length line, up to its '\n'
     char rx[LINK_RX_MAX];
     size_t tx_len;
+    bool tx_partial;            // the first frame in tx is partly written
     char tx[LINK_TX_MAX];
 } link_t;
 
@@ -62,6 +64,11 @@ void link_init(link_t *l, int fd, uint32_t reply_timeout_ms,
 // is down): the link is down, or the frame is too long, or too much is
 // waiting; fn is never called then.
 bool link_request(link_t *l, const cJSON *req, link_reply_fn fn, void *ctx);
+
+// The same for an emergency request (D-R17): it goes ahead of every frame
+// not yet written to the device (after the one being written, if any), and
+// a full pending table doesn't stop it
+bool link_request_urgent(link_t *l, const cJSON *req, link_reply_fn fn, void *ctx);
 
 // A request with only cmd and, unless NULL, oid
 cJSON *link_new_request(const char *cmd, const char *oid);

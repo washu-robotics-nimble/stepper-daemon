@@ -1,0 +1,25 @@
+# nimhubd: the daemon that owns the nimhub board's host link (docs/daemon/spec.md).
+# Installed by `make install`, which fills in @BINDIR@ and @CONFDIR@.
+
+[Unit]
+Description=nimhubd, host daemon for the nimhub RP2040 board
+
+[Service]
+Type=simple
+ExecStart=@BINDIR@/nimhubd @CONFDIR@/nimhub.ini
+# A throwaway user: dialout for the board's /dev/ttyACM*, and nimhub as the
+# primary group, so the client socket belongs to it (D-R12)
+DynamicUser=yes
+Group=nimhub
+SupplementaryGroups=dialout
+# /run/nimhubd/ for control.sock; members of nimhub may enter it
+RuntimeDirectory=nimhubd
+RuntimeDirectoryMode=0750
+# SIGTERM stops motion first, waiting up to 2 s for it (D-R2)
+KillSignal=SIGTERM
+TimeoutStopSec=5
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

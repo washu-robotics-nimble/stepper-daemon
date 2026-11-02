@@ -21,6 +21,7 @@ To ensure precision and consistency, units are in:
 
 - `D-R1` The daemon MUST be the only process that opens the RP2040's USB device, and MUST refuse to start if the device is already held. (`D-G1`)
 - `D-R2` The daemon MUST run without a terminal; on SIGTERM/SIGINT, stop motion, then close the link. (`D-G1`)
+  - It sends `stop` to every axis the firmware last reported moving, and waits for their `move_end`, for at most 2 s or until the link drops. A second signal ends the wait at once.
 - `D-R3` The daemon MUST load an INI config at startup. After every handshake it MUST query the firmware's objects (F-R35), send each object that has an INI section its settings, and then signal that settings are complete (F-R33), before accepting motion commands. Objects without an INI section keep the firmware's safe defaults (F-R34). Settings changed by clients at runtime (e.g. `speed`, `offset`, `tare`) MUST be kept by the daemon and re-sent instead of the INI values; they revert to the INI only when the daemon restarts. The INI holds behavioural settings only; the hardware layout is defined by the firmware (F-R34). (`D-G3`)
 
 ## Clients
@@ -29,12 +30,13 @@ To ensure precision and consistency, units are in:
   - It accepts up to 8; a connection beyond that is closed at once.
 - `D-R11` Client API MUST be independent of the client type. The CLI and the Python clients use the same commands. (`D-G2`)
 - `D-R12` Clients MUST connect over a single Unix domain socket. The daemon MUST NOT listen on any network socket. Access is controlled by the socket file's permissions. (`D-G2`)
-  - Default path: `/run/nimhubd/control.sock`, mode `0660`, group `stepper`. The directory is created by systemd `RuntimeDirectory=`.
+  - Default path: `/run/nimhubd/control.sock`, mode `0660`, group `nimhub`. The directory is created by systemd `RuntimeDirectory=`.
   - Path and group are overridable in the INI.
 - `D-R13` Every command MUST belong to exactly one class: 'read' (read-only), 'session' (lease handling), 'emergency', or 'write'. The daemon MUST be the only place where conflicts between clients are resolved. (`D-G1`, `D-G2`)
 - `D-R15` Every client, including the interactive CLI, MUST be a separate process that connects through the client API. The daemon MUST NOT contain a user interface or serve HTTP. (`D-G2`)
 - `D-R16` Read-only and session commands MUST be accepted from any client at any time, and need no lease. (`D-G2`)
 - `D-R17` Emergency commands MUST be honored from any client at any time, with or without a lease, and MUST be sent to the firmware ahead of all other queued traffic. (`D-G1`)
+  - "Queued" means frames the daemon hasn't written to the device yet; a frame already partly written is finished first. A limit on requests waiting for replies doesn't apply to emergency commands. The firmware then runs `estop` ahead of its own queue (F-R24).
 - `D-R18` A write command MUST be rejected with a "lease held" error unless the sender holds the lease. Lease rules: (`D-G2`)
   - acquired explicitly and kept by renewal (`lease` or `renew`; no other command renews it);
   - expires after 5 s (configurable: `lease_timeout_ms` in `[daemon]`) without renewal;
