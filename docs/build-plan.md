@@ -149,8 +149,13 @@ Questions are at the end; answer them as before.
 - 500 ms response timeout, position invalid, `link_down` to clients (D-R30).
 - Reconnect backoff 250 ms doubling to 2 s (D-R31); runtime settings re-sent instead of the INI values (D-R3).
 - Reset detection through `settings_applied`.
+- Decided 2026-11-02:
+  - `link_down` / `link_up` events go to every client.
+  - While down, no position is reported at all; nimhubd doesn't make up `pos_valid: false`, so it comes from the firmware after the reconnect (D-R20).
+  - A failed handshake, and a device missing at startup, are retried instead of ending nimhubd.
+  - A `not_configured` reply also counts as a firmware reset.
 
-**Test:** unplug the Pico during a move: clients get `link_down`, and plugging it back in restores service with the runtime `speed` kept. `dummy_mcu.py` covers the timeout and reset cases.
+**Test:** unplug the Pico during a move: clients get `link_down`, and plugging it back in restores service with the runtime `speed` kept. `dummy_mcu.py` covers the timeout and reset cases. Done 2026-11-02, USB only.
 
 ### 14. Process behaviour
 

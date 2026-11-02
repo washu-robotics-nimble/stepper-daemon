@@ -79,8 +79,13 @@ void link_handle(link_t *l, short revents);
 // Reply timeouts and keepalive pings
 void link_tick(link_t *l);
 
-// Down after a read or write error, a hangup, or a missing reply (D-R30).
-// The reason is logged once.
+// Down after a read or write error, a hangup, a missing reply (D-R30), or
+// link_close(). The reason is in down_reason; the caller logs it.
 static inline bool link_up(const link_t *l) { return l->up; }
+
+// Take the link down, e.g. on a firmware reset (D-R30): as for any other
+// drop, every waiting request gets NULL. The fd stays open (the caller
+// closes it).
+void link_close(link_t *l, const char *reason);
 
 #endif

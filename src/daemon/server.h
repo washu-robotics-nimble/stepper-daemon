@@ -77,6 +77,9 @@ void server_poll_handle(server_t *s, const struct pollfd *pfd);
 // Send msg to a client as one line; dropped if the client is gone
 void server_send(server_t *s, server_client_t client, const cJSON *msg);
 
+// Send msg to every connected client
+void server_send_all(server_t *s, const cJSON *msg);
+
 // A request of the client gets its reply later (D-R41). A client that shuts
 // down its sending side (e.g. socat at the end of its input) is kept until
 // every request it holds is released and its output is sent.

@@ -59,12 +59,122 @@ static const char *default_config(char *buf, size_t size)
     return NULL;
 }
 
+#define BACKOFF_MIN_MS 250      // D-R31
+#define BACKOFF_MAX_MS 2000
+
+static model_t model;
+static link_t mcu;
+static handshake_t hs;
+
+// The connection to the MCU: closed (fd -1, retried at next_attempt), or
+// open with a handshake running, done (ready) or failed (D-R30, D-R31)
+static struct {
+    int fd;
+    bool ready;                 // handshake done; clients were told link_up
+    uint32_t backoff_ms;        // the wait before the next attempt
+    uint64_t next_attempt;
+    char problem[300];          // the last failure logged; "" after success
+} conn;
+
+static void on_event(void *ctx, const cJSON *evt);
+
+// D-R31: a failure is logged once per change of state, not on every retry
+static void report(const char *msg)
+{
+    if (strcmp(msg, conn.problem) == 0) {
+        log_debug("%s (again)", msg);
+        return;
+    }
+    log_error("%s; retrying", msg);
+    snprintf(conn.problem, sizeof conn.problem, "%s", msg);
+}
+
+static void schedule_retry(void)
+{
+    conn.next_attempt = monotonic_ms() + conn.backoff_ms;
+    conn.backoff_ms = conn.backoff_ms * 2 > BACKOFF_MAX_MS ? BACKOFF_MAX_MS : conn.backoff_ms * 2;
+}
+
+// Open the device and start a handshake. False only at startup, if another
+// process holds the device (D-R1); any other failure is retried.
+static bool attempt(const config_t *cfg, commands_t *c, bool startup)
+{
+    char err[300];
+    bool held;
+
+    conn.fd = serial_open(cfg->device, &held, err, sizeof err);
+    if (conn.fd < 0) {
+        if (startup && held) {
+            log_error("%s", err);
+            return false;
+        }
+        report(err);
+        schedule_retry();
+        return true;
+    }
+    link_init(&mcu, conn.fd, (uint32_t)cfg->reply_timeout_ms, on_event, c);
+    // After a failure, the handshake's progress is logged at debug level
+    handshake_start(&hs, &mcu, cfg, &model, conn.problem[0] != '\0');
+    return true;
+}
+
+// The link is gone, or the handshake failed: close, tell clients (D-R30),
+// and retry with backoff (D-R31). Requests still waiting get link_down.
+static void drop(commands_t *c, const char *what, const char *why)
+{
+    char msg[300];
+
+    snprintf(msg, sizeof msg, "%s: %s", what, why);
+    link_close(&mcu, msg);
+    serial_close(conn.fd);
+    conn.fd = -1;
+    if (conn.ready) {
+        conn.ready = false;
+        commands_link_event(c, false, msg);
+    }
+    report(msg);
+    schedule_retry();
+}
+
+// The handshake is done: clients get link_up, then the devices' state
+static void went_up(commands_t *c)
+{
+    conn.ready = true;
+    conn.backoff_ms = BACKOFF_MIN_MS;
+    if (conn.problem[0] != '\0')
+        log_info("link up again");
+    conn.problem[0] = '\0';
+    commands_link_event(c, true, NULL);
+    commands_broadcast(c);
+}
+
+// Follow the link and the handshake: drop, or tell clients it is up
+static void update(commands_t *c)
+{
+    if (conn.fd < 0)
+        return;
+    if (!link_up(&mcu))
+        drop(c, "link down", mcu.down_reason);
+    else if (hs.status == HANDSHAKE_FAILED)
+        drop(c, "handshake failed", hs.error);
+    else if (hs.status == HANDSHAKE_READY && !conn.ready)
+        went_up(c);
+}
+
 // Events from the MCU: into the model, and on to watching clients (D-R21).
 // Every frame is logged at debug level anyway; position events are too
 // frequent for more. ctx is the commands_t.
 static void on_event(void *ctx, const cJSON *evt)
 {
     commands_t *c = ctx;
+
+    // A state report from a firmware that lost its settings: it was reset
+    // (D-R30, F-R33), so reconnect
+    const cJSON *applied = cJSON_GetObjectItemCaseSensitive(evt, "settings_applied");
+    if (hs.status == HANDSHAKE_READY && cJSON_IsFalse(applied)) {
+        link_close(&mcu, "firmware reset (settings_applied false)");
+        return;
+    }
     model_event(c->model, evt);
     commands_broadcast(c);
 
@@ -75,6 +185,8 @@ static void on_event(void *ctx, const cJSON *evt)
     char *text = cJSON_PrintUnformatted(evt);
     if (cJSON_IsString(name) && strcmp(name->valuestring, "rx_error") == 0)
         log_warn("the MCU dropped a frame: %s", text != NULL ? text : "?");
+    else if (conn.problem[0] != '\0')
+        log_debug("event: %s", text != NULL ? text : "?");  // retrying (D-R31)
     else
         log_info("event: %s", text != NULL ? text : "?");
     cJSON_free(text);
@@ -126,44 +238,46 @@ int main(int argc, char *argv[])
     // A write to a client that has gone fails with EPIPE instead
     signal(SIGPIPE, SIG_IGN);
 
-    // The device first: if another nimhubd holds it, this one stops before
-    // touching that one's socket (D-R1)
-    int fd = serial_open(cfg.device);
-    if (fd < 0)
-        return EXIT_FAILURE;
-
-    static model_t model;
-    static link_t link;
-    static handshake_t hs;
     static server_t server;
     static commands_t commands;
-    link_init(&link, fd, (uint32_t)cfg.reply_timeout_ms, on_event, &commands);
-    commands_init(&commands, &link, &model, &hs, &server, (uint32_t)cfg.lease_timeout_ms);
+    commands_init(&commands, &mcu, &model, &server, (uint32_t)cfg.lease_timeout_ms);
+    conn.fd = -1;
+    conn.backoff_ms = BACKOFF_MIN_MS;
+
+    // The device first: if another process holds it, this nimhubd refuses to
+    // start (D-R1), before touching the socket of one that may be running.
+    // A device that isn't there yet is retried (D-R31).
+    if (!attempt(&cfg, &commands, true))
+        return EXIT_FAILURE;
     if (server_open(&server, cfg.socket, cfg.group, commands_line, commands_client_gone,
                     &commands) != 0) {
-        serial_close(fd);
+        if (conn.fd >= 0)
+            serial_close(conn.fd);
         return EXIT_FAILURE;
     }
-    handshake_start(&hs, &link, &cfg, &model);
 
     int status = EXIT_SUCCESS;
     for (;;) {
-        // Until reconnecting exists (build plan step 13), a link drop ends
-        // the daemon; a failed handshake always does, since retrying won't
-        // change the outcome
-        if (!link_up(&link) || hs.status == HANDSHAKE_FAILED) {
-            model_link_down(&model);
-            status = EXIT_FAILURE;
-            break;
-        }
+        uint64_t now = monotonic_ms();
+        if (conn.fd < 0 && now >= conn.next_attempt)
+            attempt(&cfg, &commands, false);
+        update(&commands);
 
-        int timeout = link_poll_timeout(&link);
-        int retry = handshake_poll_timeout(&hs);
-        if (retry >= 0 && (timeout < 0 || retry < timeout))
-            timeout = retry;
+        int timeout;
+        if (conn.fd >= 0) {
+            timeout = link_poll_timeout(&mcu);
+            int retry = handshake_poll_timeout(&hs);
+            if (retry >= 0 && (timeout < 0 || retry < timeout))
+                timeout = retry;
+        } else {
+            now = monotonic_ms();
+            timeout = conn.next_attempt <= now ? 0 : (int)(conn.next_attempt - now);
+        }
         struct timespec ts = {.tv_sec = timeout / 1000, .tv_nsec = (timeout % 1000) * 1000000L};
         struct pollfd pfds[2 + SERVER_MAX_CLIENTS];
-        pfds[0] = (struct pollfd){.fd = fd, .events = link_poll_events(&link)};
+        // A closed device is fd -1, which poll() skips
+        pfds[0] = (struct pollfd){.fd = conn.fd,
+                                  .events = conn.fd >= 0 ? link_poll_events(&mcu) : 0};
         size_t count = 1 + server_poll_fill(&server, &pfds[1]);
 
         int n = ppoll(pfds, count, timeout < 0 ? NULL : &ts, &wait_mask);
@@ -179,17 +293,21 @@ int main(int argc, char *argv[])
             break;
         }
         if (n > 0) {
-            link_handle(&link, pfds[0].revents);
+            if (conn.fd >= 0)
+                link_handle(&mcu, pfds[0].revents);
             server_poll_handle(&server, &pfds[1]);
         }
-        link_tick(&link);
-        handshake_tick(&hs);
-        // Whatever changed the model outside events and command replies
-        // (the handshake's get_state)
+        if (conn.fd >= 0) {
+            link_tick(&mcu);
+            handshake_tick(&hs);
+        }
+        // Before the broadcast, so link_up comes ahead of the state
+        update(&commands);
         commands_broadcast(&commands);
     }
 
     server_close(&server);
-    serial_close(fd);
+    if (conn.fd >= 0)
+        serial_close(conn.fd);
     return status;
 }

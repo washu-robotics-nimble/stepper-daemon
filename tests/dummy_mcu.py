@@ -26,6 +26,13 @@ Options for tests:
     --busy-ms N     set_motion fails with busy for N ms after each port open,
                     as for an axis still finishing a move
     --pos-valid     steppers start with a valid position, as after homing
+
+Signals, for tests:
+    SIGUSR1         reset: the state after boot (settings_applied false,
+                    default settings, steppers stopped), without closing the
+                    port, as a firmware reset that USB didn't notice (D-R30)
+    SIGUSR2         stop replying to anything (no reply, no rx_error), or
+                    reply again (D-R30 timeouts)
     --proto N, --fw VERSION   what identify reports
 
 Example:
@@ -304,21 +311,29 @@ class DummyMCU:
         self.master = master
         self.args = args
         self.t0 = time.monotonic()
-        self.objects = {}           # oid -> (type, object), in board order
-        for oid, typ in objects:
-            obj = Stepper(self, oid) if typ == "stepper" else Object(self, oid)
-            if typ == "stepper":
-                obj.pos_valid = args.pos_valid
-            self.objects[oid] = (typ, obj)
-        self.settings_applied = False
-        self.report_period = 250
-        self.timeout_ms = 0
+        self.board = objects
+        self.boot()
+        self.muted = False          # SIGUSR2: no replies at all
+        self.reset_pending = False  # SIGUSR1
+        self.mute_pending = False
         self.connected = False
         self.lost = None            # None, or why: "closed" / "timeout"
         self.last_frame = 0.0
         self.busy_until = 0.0
         self.rx = b""
         self.rx_too_long = False
+
+    def boot(self):
+        """The state after boot or reset (F-R23, F-R33, F-R34)"""
+        self.objects = {}           # oid -> (type, object), in board order
+        for oid, typ in self.board:
+            obj = Stepper(self, oid) if typ == "stepper" else Object(self, oid)
+            if typ == "stepper":
+                obj.pos_valid = self.args.pos_valid
+            self.objects[oid] = (typ, obj)
+        self.settings_applied = False
+        self.report_period = 250
+        self.timeout_ms = 0
 
     # ---- output ----
 
@@ -400,6 +415,9 @@ class DummyMCU:
         cmd = req.get("cmd")
         if cmd in self.args.no_reply:
             self.log("*", f"no reply to {cmd} (--no-reply)")
+            return
+        if self.muted:
+            self.log("*", f"no reply to {cmd} (muted, SIGUSR2)")
             return
 
         # A frame that gets a reply keeps the link alive (F-R22)
@@ -492,11 +510,25 @@ class DummyMCU:
         for typ, obj in self.objects.values():
             obj.poll(now)
 
+    def signals(self):
+        """Handle what the signal handlers asked for, in the main loop"""
+        if self.reset_pending:
+            self.reset_pending = False
+            self.log("*", "reset (SIGUSR1)")
+            self.boot()
+        if self.mute_pending:
+            self.mute_pending = False
+            self.muted = not self.muted
+            self.log("*", "muted (SIGUSR2)" if self.muted else "replying again (SIGUSR2)")
+
     def run(self):
         poller = select.poll()
         poller.register(self.master, select.POLLIN)
+        signal.signal(signal.SIGUSR1, lambda *_: setattr(self, "reset_pending", True))
+        signal.signal(signal.SIGUSR2, lambda *_: setattr(self, "mute_pending", True))
         while True:
             events = poller.poll(10)
+            self.signals()
             now = time.monotonic()
             hup = any(ev & select.POLLHUP for _, ev in events)
             data = b""

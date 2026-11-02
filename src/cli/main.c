@@ -407,6 +407,15 @@ static void on_line(void *ctx, const char *line, const cJSON *msg)
             redraw_bar();
             return;
         }
+        // The link to the MCU (D-R30): red bar while down; afterwards the
+        // devices may differ, so they are asked for again, then watch
+        if (strcmp(evt->valuestring, "link_down") == 0) {
+            S.link_down = true;
+        } else if (strcmp(evt->valuestring, "link_up") == 0) {
+            S.link_down = false;
+            S.have_devices = false;
+            S.next_devices = 0;
+        }
         // A bad_request event answers a request whose seq couldn't be read
         if (S.waiting && strcmp(evt->valuestring, "bad_request") == 0) {
             end_wait();

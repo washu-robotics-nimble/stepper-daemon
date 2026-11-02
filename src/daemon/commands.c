@@ -6,16 +6,16 @@
 #include <string.h>
 #include "log.h"
 
-// A request waiting for the MCU's reply: what to do with the model once the
-// MCU has accepted it
+// A request waiting for the MCU's reply, by what the MCU's acceptance
+// leads to
 typedef enum {
-    FW_MOVE,            // move, move_to
-    FW_STOP,
-    FW_ESTOP,
-    FW_SET,             // set_motion with one setting (speed, accel, micro)
-    FW_ZERO,            // set_position 0
-    FW_LOCK,            // set_enable 1
-    FW_UNLOCK,          // set_enable 0
+    FW_MOVE,            // move, move_to: state refreshed
+    FW_STOP,            // the reply carries the end position
+    FW_ESTOP,           // every stepper's state refreshed
+    FW_SET,             // set_motion with one setting (speed, accel, micro): kept
+    FW_ZERO,            // set_position 0: state refreshed
+    FW_LOCK,            // set_enable 1: state refreshed
+    FW_UNLOCK,          // set_enable 0: state refreshed
 } fw_kind_t;
 
 typedef struct {
@@ -26,7 +26,15 @@ typedef struct {
     model_device_t *dev;        // NULL for estop
     model_setting_t setting;    // FW_SET
     int32_t value;              // FW_SET
+    cJSON *out;                 // the client's reply, held while refreshing
+    int refreshing;             // get_state requests still waiting
 } fw_request_t;
+
+// A get_state on behalf of a client request
+typedef struct {
+    fw_request_t *f;
+    model_device_t *dev;
+} refresh_t;
 
 // The context of one client request
 typedef struct {
@@ -46,11 +54,11 @@ typedef struct {
 } command_t;
 
 void commands_init(commands_t *c, link_t *link, model_t *model,
-                   const handshake_t *hs, server_t *server, uint32_t lease_timeout_ms)
+                   server_t *server, uint32_t lease_timeout_ms)
 {
     c->link = link;
     c->model = model;
-    c->hs = hs;
+    c->up = false;
     c->server = server;
     lease_init(&c->lease, lease_timeout_ms);
     memset(c->watching, 0, sizeof c->watching);
@@ -104,6 +112,10 @@ void commands_broadcast(commands_t *c)
 {
     model_t *m = c->model;
 
+    // During a handshake the model is being filled: its first state goes
+    // out once it is done, after link_up
+    if (!c->up || !link_up(c->link))
+        return;
     for (size_t i = 0; i < m->count; i++) {
         model_device_t *d = &m->devices[i];
         if (!model_is_stepper(d) || !model_take_change(d))
@@ -112,6 +124,17 @@ void commands_broadcast(commands_t *c)
             if (is_watching(c, k))
                 send_status_event(c, (server_client_t){k, c->watching_gen[k]}, d);
     }
+}
+
+void commands_link_event(commands_t *c, bool up, const char *reason)
+{
+    c->up = up;
+    cJSON *evt = cJSON_CreateObject();
+    cJSON_AddStringToObject(evt, "evt", up ? "link_up" : "link_down");
+    if (!up)
+        cJSON_AddStringToObject(evt, "reason", reason);
+    server_send_all(c->server, evt);
+    cJSON_Delete(evt);
 }
 
 // ---- Replies -----
@@ -168,6 +191,53 @@ static const char *client_error(const char *fw)
     return fw;
 }
 
+static bool fw_acked(const cJSON *reply)
+{
+    return cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(reply, "ack"));
+}
+
+// The end of a client request: its reply (unless an error was sent
+// already), then status events, so the sender gets the reply first, then
+// the client may go
+static void finish(fw_request_t *f)
+{
+    commands_t *c = f->c;
+
+    if (f->out != NULL)
+        send_reply(c, f->client, f->out);
+    commands_broadcast(c);
+    server_release(c->server, f->client);
+    free(f);
+}
+
+static void on_refresh(void *ctx, const cJSON *reply)
+{
+    refresh_t *rf = ctx;
+    fw_request_t *f = rf->f;
+
+    // No reply (link down): nothing is known, and clients hear link_down
+    if (reply != NULL && fw_acked(reply))
+        model_set_state(rf->dev, reply);
+    free(rf);
+    if (--f->refreshing == 0)
+        finish(f);
+}
+
+// Ask the firmware for d's state on behalf of f (D-R20)
+static void refresh(fw_request_t *f, model_device_t *d)
+{
+    refresh_t *rf = malloc(sizeof *rf);
+    *rf = (refresh_t){f, d};
+    f->refreshing++;
+    cJSON *req = link_new_request("get_state", d->oid);
+    bool sent = link_request(f->c->link, req, on_refresh, rf);
+    cJSON_Delete(req);
+    if (!sent) {
+        free(rf);
+        f->refreshing--;
+    }
+}
+
 static void on_fw_reply(void *ctx, const cJSON *reply)
 {
     fw_request_t *f = ctx;
@@ -175,44 +245,45 @@ static void on_fw_reply(void *ctx, const cJSON *reply)
 
     if (reply == NULL) {
         send_error(c, f->client, f->seq, "link_down", "the link to the MCU went down");
-    } else if (!cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(reply, "ack"))) {
-        const cJSON *err = cJSON_GetObjectItemCaseSensitive(reply, "err");
-        send_error(c, f->client, f->seq,
-                   client_error(cJSON_IsString(err) ? err->valuestring : "?"),
-                   "rejected by the MCU");
-    } else {
-        cJSON *out = new_reply(f->seq, true);
-        switch (f->kind) {
-        case FW_MOVE:
-            model_move_accepted(f->dev);
-            break;
-        case FW_STOP: {
-            // The position the move ends at (F-R21)
-            const cJSON *pos = cJSON_GetObjectItemCaseSensitive(reply, "pos");
-            if (cJSON_IsNumber(pos))
-                cJSON_AddNumberToObject(out, "pos", pos->valuedouble);
-            break;
-        }
-        case FW_ESTOP:
-            model_estop(c->model);
-            break;
-        case FW_SET:
-            model_set_setting(f->dev, f->setting, f->value);
-            break;
-        case FW_ZERO:
-            model_zeroed(f->dev);
-            break;
-        case FW_LOCK:
-        case FW_UNLOCK:
-            model_enabled(f->dev, f->kind == FW_LOCK);
-            break;
-        }
-        send_reply(c, f->client, out);
+        finish(f);
+        return;
     }
-    // After the reply, so the client that sent the command gets it first
-    commands_broadcast(c);
-    server_release(c->server, f->client);
-    free(f);
+    if (!fw_acked(reply)) {
+        const cJSON *err = cJSON_GetObjectItemCaseSensitive(reply, "err");
+        const char *code = cJSON_IsString(err) ? err->valuestring : "?";
+        send_error(c, f->client, f->seq, client_error(code), "rejected by the MCU");
+        // Only a firmware that lost its settings says this after the
+        // handshake: it was reset (D-R30), so reconnect
+        if (strcmp(code, "not_configured") == 0)
+            link_close(c->link, "firmware reset (not_configured)");
+        finish(f);
+        return;
+    }
+
+    f->out = new_reply(f->seq, true);
+    if (f->kind == FW_STOP) {
+        // The position the move ends at (F-R21)
+        const cJSON *pos = cJSON_GetObjectItemCaseSensitive(reply, "pos");
+        if (cJSON_IsNumber(pos))
+            cJSON_AddNumberToObject(f->out, "pos", pos->valuedouble);
+    } else if (f->kind == FW_SET) {
+        model_set_setting(c->model, f->dev, f->setting, f->value);
+    }
+
+    // The state after the command comes from the firmware, not from what
+    // the command implies (D-R20): get_state, and the client's reply once
+    // it is in. One extra count keeps f alive while the requests go out,
+    // as a reply can come before link_request() returns (a link drop).
+    f->refreshing = 1;
+    if (f->kind == FW_ESTOP) {
+        for (size_t i = 0; i < c->model->count; i++)
+            if (model_is_stepper(&c->model->devices[i]))
+                refresh(f, &c->model->devices[i]);
+    } else if (f->kind != FW_STOP && f->kind != FW_SET) {
+        refresh(f, f->dev);
+    }
+    if (--f->refreshing == 0)
+        finish(f);
 }
 
 // Send req (and free it) for r; the client's reply comes from the MCU's.
@@ -389,6 +460,10 @@ static void cmd_watch(const request_t *r)
     c->watching[r->client.index] = true;
     c->watching_gen[r->client.index] = r->client.gen;
     send_reply(c, r->client, new_reply(r->seq, true));
+    // Without a link there is no state to report (D-R20): it comes after
+    // link_up, as for everyone watching
+    if (!c->up || !link_up(c->link))
+        return;
     for (size_t i = 0; i < m->count; i++)
         if (model_is_stepper(&m->devices[i]) && m->devices[i].known)
             send_status_event(c, r->client, &m->devices[i]);
@@ -405,7 +480,7 @@ static void cmd_devices(const request_t *r)
 {
     const model_t *m = r->c->model;
 
-    if (r->c->hs->status != HANDSHAKE_READY) {
+    if (!r->c->up || !link_up(r->c->link)) {
         reply_error(r, "link_down", "the MCU isn't connected and configured");
         return;
     }
@@ -507,12 +582,11 @@ static void dispatch(request_t *r, const char *name, const cJSON *dev)
 
     // Daemon commands have no dev (D-R14)
     if (dev == NULL) {
+        // Session and read commands work at any time (D-R16); estop and
+        // devices answer link_down themselves while the link is down
         const command_t *cmd = find(daemon_commands, name);
         if (cmd != NULL) {
-            if (!link_up(c->link))
-                reply_error(r, "link_down", "no link to the MCU");
-            else
-                run(r, cmd);
+            run(r, cmd);
         } else if (find(motor_commands, name) != NULL) {
             reply_error(r, "unknown_cmd", "a device command needs dev");
         } else {
@@ -522,8 +596,8 @@ static void dispatch(request_t *r, const char *name, const cJSON *dev)
     }
 
     // Devices are known, and their state valid, once the handshake is done
-    // (D-R3, D-R30)
-    if (!link_up(c->link) || c->hs->status != HANDSHAKE_READY) {
+    // and clients were told link_up (D-R3, D-R30)
+    if (!c->up || !link_up(c->link)) {
         reply_error(r, "link_down", "the MCU isn't connected and configured");
         return;
     }

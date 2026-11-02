@@ -268,32 +268,53 @@ def holder_checks(b):
         dummy.stop()
 
 
+def errors(d, text):
+    """How many error lines in d's log contain text"""
+    with d.cond:
+        return sum(" ERROR " in line and text in line for line in d.lines)
+
+
 def failure_checks(b):
-    def run(name, dummy_args, expect, m0=M0, timeout=3.0):
-        dummy = Dummy(b.tty, *dummy_args)
+    # Errors in the INI: nimhubd doesn't start
+    def run_exit(name, expect, m0):
+        dummy = Dummy(b.tty)
         d = b.daemon(b.ini(m0))
-        rc = d.exit_code(timeout)
+        rc = d.exit_code()
         check(name, rc == 1 and d.has(expect), f"rc {rc}\n" + d.dump())
         d.stop()
         dummy.stop()
         return dummy
 
-    dummy = run("bad INI value: exits before opening the device", [],
-                "bad value '3' for 'microsteps'", m0="microsteps = 3")
+    dummy = run_exit("bad INI value: exits before opening the device",
+                     "bad value '3' for 'microsteps'", "microsteps = 3")
     check("...and sends nothing", dummy.received() == [])
-    run("unknown INI key: exits", [], "unknown key 'max_accel'", m0="max_accel = 400")
-    run("unsupported protocol: exits", ["--proto", "2"], "protocol 2")
-    dummy = run("settings rejected by the MCU: exits", [],
-                "rejected the settings: bad_param",
-                m0="microsteps = 16\nspeed = 5000\npulse_width_us = 20")
-    check("...without settings_done",
+    run_exit("unknown INI key: exits", "unknown key 'max_accel'", "max_accel = 400")
+
+    # Failed handshakes: nimhubd stays up and retries with backoff, logging
+    # the error once (D-R31)
+    def run_retry(name, dummy_args, expect, m0=M0, seconds=2.5):
+        dummy = Dummy(b.tty, *dummy_args)
+        d = b.daemon(b.ini(m0))
+        rc = d.exit_code(seconds)
+        tries = sum(f.get("cmd") == "identify" for f in dummy.received())
+        check(name, rc is None and errors(d, expect) == 1 and tries >= 2,
+              f"rc {rc}, {tries} handshakes, {errors(d, expect)} errors\n" + d.dump())
+        d.stop()
+        dummy.stop()
+        return dummy
+
+    run_retry("unsupported protocol: retried, logged once", ["--proto", "2"], "protocol 2")
+    dummy = run_retry("settings rejected by the MCU: retried, logged once", [],
+                      "rejected the settings: bad_param",
+                      m0="microsteps = 16\nspeed = 5000\npulse_width_us = 20")
+    check("...never settings_done",
           not any(f.get("cmd") == "settings_done" for f in dummy.received()))
-    run("INI key that doesn't fit the object's type: exits",
-        ["--objects", "m0:hx711"], "'speed' is not a setting of a hx711", m0="speed = 100")
-    run("missing reply (D-R30): link down, exits", ["--no-reply", "list_objects"],
-        "no reply to list_objects")
-    dummy = run("axis busy for too long: exits", ["--busy-ms", "5000"], "still moving",
-                timeout=4.0)
+    run_retry("INI key that doesn't fit the object's type: retried, logged once",
+              ["--objects", "m0:hx711"], "'speed' is not a setting of a hx711", m0="speed = 100")
+    run_retry("missing reply (D-R30): link down, retried, logged once",
+              ["--no-reply", "list_objects"], "no reply to list_objects")
+    run_retry("axis busy for too long: retried, logged once", ["--busy-ms", "5000"],
+              "still moving", seconds=5.0)
 
     # Busy for a moment: retried until it goes through
     dummy = Dummy(b.tty, "--busy-ms", "300")
@@ -305,14 +326,27 @@ def failure_checks(b):
     d.stop()
     dummy.stop()
 
-    # The MCU goes away (unplugged)
+    # The MCU goes away (unplugged): nimhubd stays, and retries
     dummy = Dummy(b.tty)
     d = b.daemon(b.ini())
     d.wait_for("handshake: done")
     dummy.stop()
-    rc = d.exit_code()
-    check("MCU gone: link down, exits", rc == 1 and d.has("link down"), f"rc {rc}\n" + d.dump())
+    rc = d.exit_code(3.0)
+    check("MCU gone: link down logged once, nimhubd stays",
+          rc is None and errors(d, "link down") == 1, f"rc {rc}\n" + d.dump())
+    check("...and the missing device is logged once, not on every retry",
+          errors(d, "cannot open") + errors(d, "cannot resolve") == 1, d.dump())
     d.stop()
+
+    # The device not there at startup: nimhubd starts, and connects once it is
+    d = b.daemon(b.ini())
+    started = d.wait_for("listening on") is not None
+    time.sleep(0.6)
+    dummy = Dummy(b.tty)
+    check("no device at startup: nimhubd starts anyway, and connects once it appears",
+          started and d.wait_for("handshake: done", 4.0) is not None, d.dump())
+    d.stop()
+    dummy.stop()
 
 
 class Client:
@@ -401,6 +435,129 @@ def err(reply, code):
 
 
 STATE_KEYS = {"evt", "dev", "pos", "pos_valid", "moving", "locked"}
+
+
+def wait_event(cl, name, timeout=5.0):
+    """cl's events until one named name (returned), or None after timeout;
+    all of them are in cl.seen"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        e = cl.event(max(0.0, deadline - time.monotonic()))
+        if e is None:
+            return None
+        cl.seen.append(e)
+        if e.get("evt") == name:
+            return e
+    return None
+
+
+def reconnect_checks(b):
+    """Link failure and reconnect (D-R30, D-R31), and the runtime settings
+    re-sent after it (D-R3)"""
+    dummy = Dummy(b.tty, "--objects", "m0:stepper,m1:stepper")
+    d = b.daemon(b.ini(m0=M0_FREE, daemon="lease_timeout_ms = 60000"))
+    d.wait_for("handshake: done")
+    c, c2 = Client(b.socket), Client(b.socket)
+    c.seen, c2.seen = [], []
+    try:
+        c.call("lease")
+        c.call("watch")
+        events_until(c, lambda e: e.get("dev") == "m1", 2.0)
+        r = c.call("speed", "m0", value=400)
+        check("runtime speed 400 (the INI says 300)", acked(r), str(r))
+        c.call("rel", "m0", steps=5000)
+        time.sleep(0.3)
+
+        # Unplugged during a move
+        dummy.stop()
+        t_drop = time.monotonic()
+        e = wait_event(c, "link_down", 2.0)
+        e2 = wait_event(c2, "link_down", 2.0)
+        check("unplugged: link_down to every client, watching or not, with a reason",
+              e is not None and e2 is not None and "link down" in e.get("reason", ""),
+              f"{e} {e2}")
+        c.seen = []
+        for name, r in [("status", c.call("status", "m0")), ("pos", c.call("pos", "m0")),
+                        ("devices", c.call("devices")), ("rel", c.call("rel", "m0", steps=1)),
+                        ("estop", c.call("estop"))]:
+            check(f"while down: {name} gets link_down", err(r, "link_down"), str(r))
+        r = c.call("renew")
+        check("while down: the lease is kept", acked(r), str(r))
+
+        # Back after 2 s: attempts at 0.25, 0.75, 1.75 and 3.75 s (D-R31)
+        time.sleep(max(0.0, 2.0 - (time.monotonic() - t_drop)))
+        dummy = Dummy(b.tty, "--objects", "m0:stepper,m1:stepper")
+        e = wait_event(c, "link_up", 4.0)
+        t_up = time.monotonic() - t_drop
+        check("no state made up by nimhubd while down (D-R20): no status event before link_up",
+              not any(x.get("evt") == "status" for x in c.seen), str(c.seen))
+        check("plugged in again: link_up, at the backoff's 4th attempt (3.75 s)",
+              e is not None and 3.4 <= t_up <= 4.4, f"{e} after {t_up:.2f} s")
+        check("...to every client", wait_event(c2, "link_up", 1.0) is not None)
+        evs = events_until(c, lambda e: e.get("dev") == "m1", 2.0)
+        check("...then the state of every device, from the firmware",
+              [x.get("dev") for x in evs] == ["m0", "m1"]
+              and evs[0].get("pos") == 0 and evs[0].get("moving") is False, str(evs))
+        motion = [f for f in dummy.received() if f.get("cmd") == "set_motion"]
+        check("...and the runtime speed re-sent instead of the INI's (D-R3)",
+              len(motion) == 1 and motion[0].get("oid") == "m0" and motion[0].get("speed") == 400
+              and motion[0].get("microsteps") == 4, str(motion))
+        check("...and errors logged once: the drop and the missing device",
+              errors(d, "link down") == 1 and errors(d, "cannot") == 1, d.dump())
+        r = c.call("rel", "m0", steps=10)
+        check("...and service is back, with the same lease", acked(r), str(r))
+        c.wait_idle()
+
+        # A second drop, with the device back at once: the backoff was reset
+        r = c.call("accel", "m1", value=900)
+        dummy.stop()
+        t_drop = time.monotonic()
+        wait_event(c, "link_down", 2.0)
+        dummy = Dummy(b.tty, "--objects", "m0:stepper,m1:stepper")
+        e = wait_event(c, "link_up", 3.0)
+        t_up = time.monotonic() - t_drop
+        check("backoff reset after a good handshake: back at the 1st attempt (0.25 s)",
+              e is not None and t_up < 1.0, f"{e} after {t_up:.2f} s")
+        motion = [f for f in dummy.received() if f.get("cmd") == "set_motion"]
+        check("...runtime settings for both: m0 speed, m1 accel (no INI section)",
+              acked(r) and [(f.get("oid"), f.get("speed"), f.get("accel")) for f in motion]
+              == [("m0", 400, 1000), ("m1", None, 900)], str(motion))
+        events_until(c, lambda e: e.get("dev") == "m1", 2.0)
+
+        # A firmware reset: not_configured (D-R30)
+        dummy.p.send_signal(signal.SIGUSR1)
+        time.sleep(0.2)
+        r = c.call("rel", "m0", steps=10)
+        check("firmware reset: the move gets link_down (not_configured)", err(r, "link_down"),
+              str(r))
+        e = wait_event(c, "link_down", 2.0)
+        check("...then link_down, saying why", e is not None and "firmware reset" in e["reason"],
+              str(e))
+        check("...then link_up after a new handshake", wait_event(c, "link_up", 3.0) is not None)
+        motion = [f for f in dummy.received() if f.get("cmd") == "set_motion"]
+        check("...with the settings sent again", len(motion) == 4, str(motion))
+        events_until(c, lambda e: e.get("dev") == "m1", 2.0)
+
+        # The MCU stops answering (D-R30): a missing reply is a drop
+        dummy.p.send_signal(signal.SIGUSR2)
+        time.sleep(0.2)
+        r = c.call("rel", "m0", steps=10)
+        check("no replies: the request gets link_down after the reply timeout",
+              err(r, "link_down"), str(r))
+        e = wait_event(c, "link_down", 2.0)
+        check("...and link_down: no reply", e is not None and "no reply" in e["reason"], str(e))
+        time.sleep(2.0)
+        # The first missed reply may be a keepalive ping's or the move's
+        check("...retried while it stays silent, each reason logged once",
+              errors(d, "no reply to") == 2 and errors(d, "no reply to identify") == 1
+              and d.p.poll() is None, d.dump())
+        dummy.p.send_signal(signal.SIGUSR2)
+        check("answering again: link_up", wait_event(c, "link_up", 4.0) is not None)
+    finally:
+        c.close()
+        c2.close()
+        d.stop()
+        dummy.stop()
 
 
 def events_until(w, done, timeout=10.0):
@@ -533,9 +690,10 @@ def client_checks(b):
         r = c.call("rel", "m0", steps=400)
         check("rel 400: accepted", acked(r), str(r))
         frames = dummy.received()
-        check("rel 400 is sent as move", frames[-1].get("cmd") == "move"
-              and frames[-1].get("oid") == "m0" and frames[-1].get("steps") == 400,
-              str(frames[-1]))
+        check("rel 400 is sent as move, then get_state: the new state comes from the firmware",
+              [f.get("cmd") for f in frames[-2:]] == ["move", "get_state"]
+              and frames[-2].get("oid") == "m0" and frames[-2].get("steps") == 400,
+              str(frames[-2:]))
         st = c.call("status", "m0")
         check("status right after rel: moving", acked(st) and st.get("moving") is True, str(st))
         time.sleep(0.6)
@@ -639,6 +797,11 @@ def client_checks(b):
         check("zero, lock, unlock are sent as set_position 0, set_enable 1 and 0",
               [(f["cmd"], f.get("pos", f.get("value"))) for f in frames[-3:]]
               == [("set_position", 0), ("set_enable", 1), ("set_enable", 0)], str(frames[-3:]))
+        cmds = [f.get("cmd") for f in dummy.received() if f.get("cmd") != "ping"]
+        after = [cmds[i + 1] if i + 1 < len(cmds) else None
+                 for i, x in enumerate(cmds) if x in ("set_position", "set_enable")]
+        check("...each followed by get_state (D-R20)",
+              len(after) >= 3 and all(x == "get_state" for x in after), str(cmds[-10:]))
 
         watch_checks(b, c)
 
@@ -703,6 +866,9 @@ def client_checks(b):
         time.sleep(0.2)
         r = c2.call("estop")
         check("estop from a client without the lease: accepted", acked(r), str(r))
+        tail = [(f.get("cmd"), f.get("oid")) for f in dummy.received()[-3:]]
+        check("...then get_state for every stepper, before the reply (D-R20)",
+              tail == [("estop", None), ("get_state", "m0"), ("get_state", "m1")], str(tail))
         st = c.call("status", "m0")
         check("after estop: position void, driver disabled",
               acked(st) and st.get("pos_valid") is False and st.get("locked") is False, str(st))
@@ -728,7 +894,7 @@ def client_checks(b):
     c.call("lease")
     r = c.call("abs", "m0", pos=-100)
     check("abs -100 with the position valid: accepted, sent as move_to", acked(r)
-          and dummy.received()[-1].get("cmd") == "move_to", str(r))
+          and [f.get("cmd") for f in dummy.received()[-2:]] == ["move_to", "get_state"], str(r))
     st = c.wait_idle()
     check("abs -100: ends at pos -100", st is not None and st.get("pos") == -100
           and st.get("pos_valid") is True, str(st))
@@ -815,9 +981,10 @@ def client_checks(b):
     c = Client(b.socket)
     r = c.call("watch")
     evs = events_until(c, lambda e: e.get("dev") == "m1", 3.0)
-    check("watching before the handshake: every device's state once it is done",
+    check("watching before the handshake: link_up, then every device's state once it is done",
           acked(r) and d.has("handshake: done")
-          and [e.get("dev") for e in evs] == ["m0", "m1"], f"{r} {evs}")
+          and [e.get("evt") for e in evs] == ["link_up", "status", "status"]
+          and [e.get("dev") for e in evs[1:]] == ["m0", "m1"], f"{r} {evs}")
     c.close()
     d.stop()
     dummy.stop()
@@ -854,6 +1021,7 @@ def main():
     holder_checks(b)
     failure_checks(b)
     client_checks(b)
+    reconnect_checks(b)
     print(f"{failures} failure(s)" if failures else "all checks passed")
     sys.exit(min(failures, 125))
 

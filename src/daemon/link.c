@@ -19,6 +19,8 @@ uint64_t monotonic_ms(void)
 
 static void go_down(link_t *l, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
+// The reason is kept in down_reason; the caller of the link logs it (once
+// per change of state, D-R31)
 static void go_down(link_t *l, const char *fmt, ...)
 {
     va_list ap;
@@ -29,7 +31,7 @@ static void go_down(link_t *l, const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(l->down_reason, sizeof l->down_reason, fmt, ap);
     va_end(ap);
-    log_error("link down: %s", l->down_reason);
+    log_debug("link down: %s", l->down_reason);
 
     // No reply will come: every waiting request gets NULL instead
     while (l->pending_count > 0) {
@@ -38,6 +40,11 @@ static void go_down(link_t *l, const char *fmt, ...)
             p.fn(p.ctx, NULL);
     }
     l->tx_len = 0;
+}
+
+void link_close(link_t *l, const char *reason)
+{
+    go_down(l, "%s", reason);
 }
 
 void link_init(link_t *l, int fd, uint32_t reply_timeout_ms,
@@ -185,7 +192,8 @@ static void receive(link_t *l)
 {
     char buf[1024];
 
-    for (;;) {
+    // A line's handler may take the link down (link_close())
+    while (l->up) {
         ssize_t n = read(l->fd, buf, sizeof buf);
         if (n == 0) {
             go_down(l, "device closed");

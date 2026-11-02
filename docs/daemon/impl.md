@@ -9,7 +9,7 @@ We need to move all daemon code into `src/daemon/` later.
 
 Build plan step 0 (2026-10-31): cJSON v1.7.19 is vendored in `lib/cJSON/`. `make test` builds and runs every `tests/test_*.c` as a host program (plain C with `assert`). Since 2026-11-01, the `motor_demo` target is gone; since 2026-11-02, plain `make` builds `build/nimhubd`.
 
-Build plan step 8 (2026-11-02): the daemon is called `nimhubd`, in `src/daemon/`. It loads the INI, opens the MCU's serial device exclusively (D-R1), runs the handshake (D-R3), and then keeps the link alive and logs the MCU's events. There is no client socket yet (step 9; added since, below). A link drop or a failed handshake ends it with status 1 (reconnecting is step 13); SIGINT / SIGTERM close the link and end it with status 0.
+Build plan step 8 (2026-11-02): the daemon is called `nimhubd`, in `src/daemon/`. It loads the INI, opens the MCU's serial device exclusively (D-R1), runs the handshake (D-R3), and then keeps the link alive and logs the MCU's events. There is no client socket yet (step 9; added since, below). A link drop or a failed handshake ends it with status 1 (reconnecting is step 13; since then, it retries instead, below); SIGINT / SIGTERM close the link and end it with status 0.
 
 | File | Role |
 |---|---|
@@ -77,11 +77,11 @@ Commands (`commands.c`):
 
 Machine model (`model.c`): the devices from `list_objects`, and for each stepper `pos`, `pos_valid`, `moving` and `locked` (driver enabled). It is filled by the handshake's `get_state`, then kept current from firmware reports only (D-R20):
 - `move_start`, `position` and `move_end` events set `pos`; `move_start` and `move_end` set `moving`;
-- an accepted `move` / `move_to` sets `moving` at once, since its reply comes before `move_start`;
-- an accepted `estop` voids every position and clears every `locked` (F-R24);
-- a link drop voids every position (D-R30).
+- an accepted `move` / `move_to` sets `moving` at once, since its reply comes before `move_start` (withdrawn 2026-11-02, see "State after a command" below);
+- an accepted `estop` voids every position and clears every `locked` (F-R24) (withdrawn 2026-11-02, likewise);
+- a link drop voids every position (D-R30). (Withdrawn in step 13: that was the daemon's own guess, against D-R20; while the link is down, reads get `link_down` instead.)
 
-This is enough because nimhubd is the MCU's only host (D-R1). `set_position` and `set_enable` will update it the same way once `zero`, `lock` and `unlock` exist (step 11).
+This is enough because nimhubd is the MCU's only host (D-R1). `set_position` and `set_enable` will update it the same way once `zero`, `lock` and `unlock` exist (step 11). (Since 2026-11-02, after any of these the state comes from `get_state` instead.)
 
 Tests: `tests/check_daemon.py` adds the client checks:
 - every command, and every error code nimhubd or the firmware can give;
@@ -143,9 +143,9 @@ Lease (`lease.c`, `commands.c`):
 
 Motor commands (`commands.c`):
 - `speed`, `accel` and `micro` take an int32 `value` and send one `set_motion` field (`speed`, `accel`, `microsteps`). The firmware checks the range and the combination (F-R2), and refuses while moving (`busy`).
-- An accepted value is kept in the model (`model_set_setting()`), for step 13 to re-send after a reconnect instead of the INI's (D-R3). `handshake_start()` resets the model, so step 13 has to keep those values across it.
-- `zero` sends `set_position 0`; the model's position becomes 0 and valid.
-- `lock` / `unlock` send `set_enable 1` / `0`; the model follows, and `unlock` voids the position, as the firmware does.
+- An accepted value is kept in the model (`model_set_setting()`), for step 13 to re-send after a reconnect instead of the INI's (D-R3). (Since step 13 they are kept in the model's runtime table, which `model_reset()` leaves alone.) `handshake_start()` resets the model, so step 13 has to keep those values across it.
+- `zero` sends `set_position 0`; the model's position becomes 0 and valid. (Since 2026-11-02: from `get_state`, see "State after a command".)
+- `lock` / `unlock` send `set_enable 1` / `0`; the model follows, and `unlock` voids the position, as the firmware does. (Likewise.)
 
 nimhub-cli (`main.c`, `parse.c`):
 - A typed write command (`cli_is_write()`, a copy of the spec's write class) is wrapped in the lease: `lease`, then the write, then `release`. Only the write's reply is printed. If the lease is held by another client, the `lease_held` reply is printed instead, and nothing is sent.
@@ -166,7 +166,7 @@ Daemon (`commands.c`, `model.c`, `main.c`):
 - `watch` replies, then sends that client a `status` event for every stepper whose state is known. `unwatch` stops the events.
 - Each model device remembers the state last broadcast. `model_take_change()` compares it with the current state, and `commands_broadcast()` sends one event per changed device to every watcher. Several fields changing at once (`move_end`: `pos` and `moving`) give one event.
 - `commands_broadcast()` runs after every firmware event (`on_event()` in `main.c`) and after every firmware reply to a client command (after that reply is sent, so the sender gets the reply first). It also runs once per main loop pass, which catches the handshake's `get_state`: a client that watched before the handshake was done gets every device's state then.
-- An accepted `move` sets `moving` at once (step 9), so the event for the start of a move comes with the reply, and `move_start` changes nothing after it. A `position` event with an unchanged `pos` sends nothing.
+- An accepted `move` sets `moving` at once (step 9), so the event for the start of a move comes with the reply, and `move_start` changes nothing after it. (Since 2026-11-02, `moving` comes from the `get_state` after the move.) A `position` event with an unchanged `pos` sends nothing.
 - `status` replies and events share `add_state()`, so they have the same fields.
 
 nimhub-cli: after `devices` succeeds, it sends `watch`, and the bar follows the `status` events, which aren't printed in interactive mode. `devices` is retried every 250 ms while nimhubd has no MCU yet (`link_down`). In one-shot and stdin mode, events are printed like any other line.
@@ -174,6 +174,43 @@ nimhub-cli: after `devices` succeeds, it sends `watch`, and the bar follows the 
 Tests:
 - `tests/check_daemon.py`: the snapshot after `watch` (the same as `status`), silence while nothing changes, one event per change through a move (moving first, growing positions, the end at the target, no two in a row the same), `zero`, `lock`, `unlock`, nothing for a command that changes nothing, `watch` again, `unwatch`, and watching before the handshake is done.
 - `tests/check_cli.py`: the bar follows a move, and nimhubd's log shows the CLI's `watch` and no `status` requests from it.
+
+Build plan step 13 (2026-11-02): link failure and reconnect (D-R30, D-R31), and runtime settings re-sent after it (D-R3).
+
+Connection (`main.c`): the device is closed (`fd` -1, retried at `next_attempt`), or open with a handshake running, done or failed.
+- **Drop:** a link drop (read or write error, hangup, missing reply, or `link_close()`) or a failed handshake closes the device. Requests still waiting get `link_down` replies. If clients had been told `link_up`, they all get `link_down`, with the reason.
+- **Retry:** the next attempt waits for the backoff: 250 ms, doubling up to 2 s, forever.
+- **Up:** a finished handshake resets the backoff, sends `link_up` to every client, and then sends the devices' state to watchers. `update()` runs right after the I/O of each loop pass and before the catch-all broadcast, so `link_up` always comes first.
+- **Logging once (D-R31):** each failure reason is logged at error level when it differs from the last one, and at debug level when it repeats; success logs "link up again". To make that possible, `serial_open()`, the link and the handshake hand back their reasons (`err`, `down_reason`, `error`) instead of logging them. While retrying, the handshake's progress and the firmware's events (e.g. `link_recovered` on every open) go to debug level too.
+- **Startup:** another process holding the device still makes nimhubd refuse to start (D-R1). A missing device, or any other open error, is retried like a reconnect, so nimhubd can start before the board is plugged in.
+- **Second instance:** without the device, the device lock can't stop a second nimhubd. So before replacing an old socket file, `server_open()` tries to connect to it, and refuses if another nimhubd answers.
+- **Firmware reset (D-R30):** an event with `settings_applied` false after the handshake (`on_event()`), or a `not_configured` reply to a client command (`commands.c`), calls `link_close()`. That reconnects with a full handshake.
+- **While down:** device commands, `pos`, `status` and `devices` get `link_down`. Nothing reports a position, and no `status` event goes out: the daemon never makes up `pos_valid: false` (D-R20). Session and read commands without `dev` work, since D-R16 says any time. `estop` gets `link_down`, because it can't be sent. The lease and the watch subscriptions are kept.
+- `commands_t.up` says clients were told `link_up` and not `link_down` since. Device commands, `devices`, the `watch` snapshot and broadcasts check it instead of the handshake state.
+
+Runtime settings (D-R3): accepted `speed`, `accel` and `micro` values are kept by `oid` in the model's runtime table, which `model_reset()` leaves alone. The handshake sends `set_motion` to every stepper that has an INI section or runtime settings, and the runtime values replace the INI's fields.
+
+State after a command (2026-11-02, D-R20): the model changes only on firmware reports, never on what an accepted command implies.
+- After the firmware accepts a command that changes a device's state, `commands.c` sends `get_state` for that device, and replies to the client once the answer is in the model. That covers `move` / `move_to`, `set_position` (`zero`) and `set_enable` (`lock`, `unlock`); for `estop`, every stepper is asked.
+- So `unlock` and `estop` void the position because the firmware reports it, and an accepted move shows `moving` because `get_state` says so.
+- `refresh()` / `on_refresh()` count the `get_state` requests still waiting; `finish()` sends the held reply, then the status events, then releases the client.
+- A `get_state` without a reply (link drop) leaves the model as it was; clients get `link_down` anyway.
+- `stop` needs no refresh: its reply carries the end position, and `move_end` follows. `speed`, `accel` and `micro` change settings, not state.
+- `model_move_accepted()`, `model_estop()`, `model_zeroed()` and `model_enabled()` are gone.
+
+nimhub-cli: on `link_down` the bar shows "link down"; on `link_up` it asks for `devices` again and re-sends `watch`. Both events are printed.
+
+Tests:
+- `tests/dummy_mcu.py` gains SIGUSR1 (reset to the state after boot, without closing the port) and SIGUSR2 (stop or resume replying).
+- `tests/check_daemon.py`:
+  - unplugged during a move: `link_down` to every client, `link_down` replies, the lease kept, no `status` event while down;
+  - back after 2 s: `link_up` at the backoff's 4th attempt, the state from the firmware, the runtime `speed` re-sent, each error logged once;
+  - a second drop: back at the first attempt, since the backoff was reset; runtime settings for a stepper without an INI section re-sent too;
+  - a firmware reset through `not_configured`; a silent MCU (missed replies), retried and logged once;
+  - nimhubd starting before the device exists;
+  - failed handshakes (protocol, rejected settings, wrong key for the type, missing reply, busy) now retry, logging once, instead of exiting.
+- `tests/check_cli.py`: the bar goes red on `link_down` and back on `link_up`.
+- On the Pico (USB only, 2026-11-02): unplugged during a move for about 10 s. The watcher got `link_down`, nothing else until `link_up`, then the firmware's state (it had rebooted). The runtime `speed` 300 was re-sent instead of the INI's 200, and each error was logged once.
 
 | Module | Role today | Fate in the new architecture |
 |---|---|---|
@@ -203,12 +240,13 @@ Dependencies: libc, inih, and cJSON (client protocol D-R40 and host link F-R31).
 - `motor_home` is not implemented (no endstop support yet).
 - `soft_limit_min` and `soft_limit_max` are parsed but not enforced. Enforcement moves to the firmware (F-R25); the daemon only forwards them. Since step 8, nimhubd forwards them with `set_motion`.
 - The top-level `README.md` has a brief rewrite (2026-11-01) covering the firmware and host tests; it needs the daemon's build and run steps once they exist (build plan step 18). Since step 8, it has how to build and run nimhubd.
-- A link drop ends nimhubd instead of reconnecting (D-R30, D-R31; step 13).
+- ~~A link drop ends nimhubd instead of reconnecting (D-R30, D-R31; step 13).~~ Done in step 13.
 - SIGINT / SIGTERM close the link without stopping motion first (D-R2; step 14). The firmware stops it anyway, as a link loss (F-R22).
 - Exclusive use (D-R1): the `/proc` scan only sees the processes of nimhubd's own user unless it runs as root, and `TIOCEXCL` doesn't keep root out.
 - A key a device section leaves out keeps whatever the firmware has. If the firmware wasn't reset, that can be a value set by an earlier daemon session, not the board table's default.
 - ~~No lease yet: every client may write (D-R13, D-R16–D-R18; step 11).~~ Done in step 11. ~~Events don't reach clients yet (D-R21; step 12).~~ Done in step 12.
 - Fault state (D-R20) isn't reported to clients; the firmware's `fault` events are only logged (step 16, with `home_timeout`).
-- An event with `settings_applied` false (a firmware reset, D-R30) isn't acted on yet (step 13).
+- ~~An event with `settings_applied` false (a firmware reset, D-R30) isn't acted on yet (step 13).~~ Done in step 13. That path has no end-to-end test: the dummy MCU sends no state report on its own after a reset, so only the `not_configured` path is tested.
+- The `/proc` check (D-R1) refuses to start only at startup. A process that grabs the device while nimhubd is reconnecting is logged and retried around.
 - ~~nimhub-cli doesn't handle the lease yet.~~ Done in step 11.
 - ~~Without `zero` (step 11) there is no way to make a position valid through nimhubd, so `abs` only works after a valid position from an earlier session (e.g. one set with `tests/hostlink.py` before nimhubd started).~~ `zero` exists since step 11.

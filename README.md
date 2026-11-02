@@ -63,7 +63,7 @@ Without the board, `tests/dummy_mcu.py --link <path>` makes a dummy MCU on a pty
 # Status
 
 - [x] Firmware, one stepper: moves with trapezoid ramps, stop, emergency stop, settings and state, soft limits, link-loss handling
-- [ ] Daemon: link, handshake, settings, the client socket, the lease, every motor command but `home`, and `watch` done; reconnecting and systemd to come
+- [ ] Daemon: link, handshake, settings, the client socket, the lease, every motor command but `home`, `watch`, and reconnecting done; systemd to come
 - [x] CLI client, with automatic lease handling
 - [ ] Endstop and homing
 - [ ] HX711 load cell

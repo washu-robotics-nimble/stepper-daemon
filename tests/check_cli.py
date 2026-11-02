@@ -218,7 +218,7 @@ class Pty:
         return None
 
 
-def interactive_checks(b, d):
+def interactive_checks(b, d, bench):
     with d.cond:
         log_start = len(d.lines)
     t = Pty(b)
@@ -256,6 +256,17 @@ def interactive_checks(b, d):
     t.type("\r")
     check("interactive: the completed command is sent", t.wait_for('"locked":false}', 2.0),
           repr(t.out[-300:]))
+
+    # The MCU unplugged and back (D-R30, D-R31): red bar, then back to normal
+    bench["dummy"].stop()
+    check("interactive: link_down printed, bar red", t.wait_for('"evt":"link_down"', 2.0)
+          and t.wait_for("link down: nimhubd has no MCU", 1.0), repr(t.out[-300:]))
+    t.out = b""
+    bench["dummy"] = cd.Dummy(b.tty, "--objects", "m0:stepper,m1:stepper")
+    check("interactive: link_up printed, bar back with the devices",
+          t.wait_for('"evt":"link_up"', 4.0) and t.wait_for("m1 0 (invalid) idle free", 2.0),
+          repr(t.out[-300:]))
+
     t.type("\x15")      # Ctrl-U: clear the line
     t.type("\x03")      # Ctrl-C on an empty line quits
     rc = t.exit_code()
@@ -276,7 +287,9 @@ def main():
         if d.wait_for("handshake: done") is None:
             sys.exit("nimhubd didn't start:\n" + d.dump())
         batch_checks(b)
-        interactive_checks(b, d)
+        bench = {"dummy": dummy}    # the interactive checks replace it
+        interactive_checks(b, d, bench)
+        dummy = bench["dummy"]
     finally:
         d.stop()
         dummy.stop()

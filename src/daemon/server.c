@@ -35,6 +35,16 @@ int server_open(server_t *s, const char *path, const char *group,
             log_error("%s exists and is not a socket", path);
             return -1;
         }
+        // Left over, or another nimhubd's: one that answers is running.
+        // The device lock (D-R1) can't tell while the MCU is unplugged.
+        int probe = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        bool live = probe >= 0 && connect(probe, (struct sockaddr *)&addr, sizeof addr) == 0;
+        if (probe >= 0)
+            close(probe);
+        if (live) {
+            log_error("another nimhubd is listening on %s", path);
+            return -1;
+        }
         unlink(path);
     }
 
@@ -273,6 +283,13 @@ void server_send(server_t *s, server_client_t client, const cJSON *msg)
     c->tx_len += len + 1;
     cJSON_free(text);
     flush(s, c);
+}
+
+void server_send_all(server_t *s, const cJSON *msg)
+{
+    for (int i = 0; i < SERVER_MAX_CLIENTS; i++)
+        if (s->conns[i].fd >= 0)
+            server_send(s, (server_client_t){i, s->conns[i].gen}, msg);
 }
 
 void server_hold(server_t *s, server_client_t client)

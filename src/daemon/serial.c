@@ -78,31 +78,35 @@ static void process_name(pid_t pid, char *buf, size_t size)
     fclose(f);
 }
 
-int serial_open(const char *path)
+int serial_open(const char *path, bool *held, char *err, size_t errlen)
 {
+    *held = false;
+
     // O_NONBLOCK also keeps open() from waiting for a carrier
     int fd = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) {
-        if (errno == EBUSY)
-            log_error("%s is in exclusive use by another process", path);
+        *held = errno == EBUSY;
+        if (*held)
+            snprintf(err, errlen, "%s is in exclusive use by another process", path);
         else
-            log_error("cannot open %s: %s", path, strerror(errno));
+            snprintf(err, errlen, "cannot open %s: %s", path, strerror(errno));
         return -1;
     }
 
     struct termios tio;
     if (tcgetattr(fd, &tio) < 0) {
-        log_error("%s is not a serial device: %s", path, strerror(errno));
+        snprintf(err, errlen, "%s is not a serial device: %s", path, strerror(errno));
         close(fd);
         return -1;
     }
 
     // A second nimhubd, or a tool that locks the port too (e.g. picocom)
     if (flock(fd, LOCK_EX | LOCK_NB) < 0) {
-        if (errno == EWOULDBLOCK)
-            log_error("%s is locked by another process", path);
+        *held = errno == EWOULDBLOCK;
+        if (*held)
+            snprintf(err, errlen, "%s is locked by another process", path);
         else
-            log_error("cannot lock %s: %s", path, strerror(errno));
+            snprintf(err, errlen, "cannot lock %s: %s", path, strerror(errno));
         close(fd);
         return -1;
     }
@@ -110,14 +114,14 @@ int serial_open(const char *path)
     // From here on, other opens fail with EBUSY. A process that had the
     // device open already, without a lock (e.g. screen), is found in /proc.
     if (ioctl(fd, TIOCEXCL) < 0) {
-        log_error("cannot get exclusive use of %s: %s", path, strerror(errno));
+        snprintf(err, errlen, "cannot get exclusive use of %s: %s", path, strerror(errno));
         close(fd);
         return -1;
     }
 
     char dev[PATH_MAX];
     if (realpath(path, dev) == NULL) {
-        log_error("cannot resolve %s: %s", path, strerror(errno));
+        snprintf(err, errlen, "cannot resolve %s: %s", path, strerror(errno));
         serial_close(fd);
         return -1;
     }
@@ -126,7 +130,8 @@ int serial_open(const char *path)
     if (holder != 0) {
         char name[64];
         process_name(holder, name, sizeof name);
-        log_error("%s is already open by process %ld (%s)", path, (long)holder, name);
+        snprintf(err, errlen, "%s is already open by process %ld (%s)", path, (long)holder, name);
+        *held = true;
         serial_close(fd);
         return -1;
     }
@@ -138,7 +143,7 @@ int serial_open(const char *path)
     tio.c_cc[VMIN] = 1;
     tio.c_cc[VTIME] = 0;
     if (tcsetattr(fd, TCSANOW, &tio) < 0) {
-        log_error("cannot set up %s: %s", path, strerror(errno));
+        snprintf(err, errlen, "cannot set up %s: %s", path, strerror(errno));
         serial_close(fd);
         return -1;
     }

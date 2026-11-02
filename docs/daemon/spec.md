@@ -117,7 +117,7 @@ Arguments are listed in braces as JSON keys. Results are returned as keys in the
 
 `rel` and `abs` reply once the firmware has accepted the move, not when it ends; `status` shows `moving` until it has ended. Their `steps` and `pos` are int32 (`bad_param` otherwise). The firmware's own checks can reject them too: `busy`, `bad_param` (e.g. a target outside the soft limits), and `pos_invalid` for any move while soft limits are set and the position is invalid (F-R25). `abs` is rejected with `pos_invalid` whenever the position is invalid, without asking the firmware.
 
-`pos` and `status` are answered from the latest firmware reports (D-R20): the events, and the replies to the commands the daemon sends. They don't query the firmware, so during a move `pos` can be up to the firmware's `report_period` old (F-R32).
+`pos` and `status` are answered from the latest firmware reports (D-R20): the events, and the firmware's `get_state` replies. After a command that changes a device's state (`rel`, `abs`, `zero`, `lock`, `unlock`; `estop` for every device), the daemon asks the firmware for that state, and replies to the client once it has the answer. A `status` right after the reply shows what the firmware reported, not what the daemon expects the command to have done. They don't query the firmware, so during a move `pos` can be up to the firmware's `report_period` old (F-R32).
 
 ### Load sensor device
 
@@ -147,6 +147,8 @@ Client-local commands such as `help` and `quit` are not part of the protocol.
 |---|---|---|
 | `status` | `dev`, and the fields of a `status` reply: `pos`, `pos_valid`, `moving`, `locked` | To watching clients (D-R21): after `watch`, and once per change of a device's state; several fields changing together give one event (D-R22). A client whose command changed the state gets the command's reply first |
 | `bad_request` | `msg` | To the client whose line couldn't be read (D-R40) |
+| `link_down` | `reason` | To every client, when the link to the MCU drops or the firmware is found reset (D-R30) |
+| `link_up` | - | To every client, once the handshake is done again (D-R30, D-R31); watching clients then get every device's state |
 
 Fault state (D-R20) is not reported yet: TBD, with `home_timeout` (build plan step 16).
 
@@ -159,4 +161,7 @@ Fault state (D-R20) is not reported yet: TBD, with `home_timeout` (build plan st
 ## Link failure
 
 - `D-R30` On link drop or firmware reset (USB re-enumeration, or a report with `settings_applied` false, F-R33), daemon MUST mark position invalid, report link-down to all clients, and reject motion until reconnected and config re-sent. A request the MCU doesn't answer within a timeout (default 500 ms, configurable) counts as a link drop; the daemon does not retransmit. (`D-G3`, `D-G4`)
+  - Marking the position invalid means reporting no position while the link is down: device commands, `pos` and `status` included, get `link_down`, and no `status` event is sent. The daemon never reports `pos_valid: false` of its own (D-R20); after the reconnect, the state comes from the firmware.
+  - Link-down and link-up are reported with the `link_down` and `link_up` events, to every connected client.
+  - A firmware reset is also seen in a `not_configured` reply, which the firmware only gives when its settings weren't applied.
 - `D-R31` Daemon MUST reconnect automatically. Backoff: exponential, starting at 250 ms and doubling up to a 2 s cap, retrying forever; it resets after a successful handshake (F-R33). A failure is logged once per change of state, not on every retry. (`D-G4`)

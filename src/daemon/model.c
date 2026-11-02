@@ -5,7 +5,8 @@
 
 void model_reset(model_t *m)
 {
-    memset(m, 0, sizeof *m);
+    m->count = 0;
+    memset(m->devices, 0, sizeof m->devices);
 }
 
 model_device_t *model_add(model_t *m, const char *oid, const char *type)
@@ -79,36 +80,26 @@ void model_event(model_t *m, const cJSON *evt)
         d->moving = false;
 }
 
-void model_move_accepted(model_device_t *d)
+void model_set_setting(model_t *m, const model_device_t *d, model_setting_t s, int32_t value)
 {
-    d->moving = true;
-}
-
-void model_estop(model_t *m)
-{
-    for (size_t i = 0; i < m->count; i++) {
-        m->devices[i].pos_valid = false;
-        m->devices[i].locked = false;
+    model_runtime_t *r = (model_runtime_t *)model_runtime(m, d->oid);
+    if (r == NULL) {
+        if (m->runtime_count == MODEL_MAX_DEVICES)
+            return;     // can't happen: oids come from at most that many devices
+        r = &m->runtime[m->runtime_count++];
+        memset(r, 0, sizeof *r);
+        strcpy(r->oid, d->oid);
     }
+    r->has[s] = true;
+    r->value[s] = value;
 }
 
-void model_set_setting(model_device_t *d, model_setting_t s, int32_t value)
+const model_runtime_t *model_runtime(const model_t *m, const char *oid)
 {
-    d->has_setting[s] = true;
-    d->setting[s] = value;
-}
-
-void model_zeroed(model_device_t *d)
-{
-    d->pos = 0;
-    d->pos_valid = true;
-}
-
-void model_enabled(model_device_t *d, bool enabled)
-{
-    d->locked = enabled;
-    if (!enabled)
-        d->pos_valid = false;
+    for (size_t i = 0; i < m->runtime_count; i++)
+        if (strcmp(m->runtime[i].oid, oid) == 0)
+            return &m->runtime[i];
+    return NULL;
 }
 
 bool model_take_change(model_device_t *d)
@@ -124,10 +115,4 @@ bool model_take_change(model_device_t *d)
     d->sent_moving = d->moving;
     d->sent_locked = d->locked;
     return true;
-}
-
-void model_link_down(model_t *m)
-{
-    for (size_t i = 0; i < m->count; i++)
-        m->devices[i].pos_valid = false;
 }

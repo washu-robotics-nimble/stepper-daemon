@@ -12,17 +12,23 @@ static void on_set_motion(void *ctx, const cJSON *reply);
 static void on_settings_done(void *ctx, const cJSON *reply);
 static void on_get_state(void *ctx, const cJSON *reply);
 
+// Progress and warnings: at info / warning level on the first attempt after
+// a change of state, at debug level on retries (D-R31)
+#define hs_info(h, ...) log_log((h)->quiet ? LOG_DEBUG : LOG_INFO, __FILE__, __LINE__, __VA_ARGS__)
+#define hs_warn(h, ...) log_log((h)->quiet ? LOG_DEBUG : LOG_WARN, __FILE__, __LINE__, __VA_ARGS__)
+
 static void fail(handshake_t *h, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
+// The reason goes to h->error, for the caller to log (once per change of
+// state, D-R31)
 static void fail(handshake_t *h, const char *fmt, ...)
 {
-    char msg[256];
     va_list ap;
 
     va_start(ap, fmt);
-    vsnprintf(msg, sizeof msg, fmt, ap);
+    vsnprintf(h->error, sizeof h->error, fmt, ap);
     va_end(ap);
-    log_error("handshake failed: %s", msg);
+    log_debug("handshake failed: %s", h->error);
     h->status = HANDSHAKE_FAILED;
 }
 
@@ -31,9 +37,9 @@ static void send(handshake_t *h, cJSON *req, link_reply_fn fn)
 {
     bool sent = link_request(h->link, req, fn, h);
     cJSON_Delete(req);
-    // Not sent with the link up: a frame problem, already logged
+    // Not sent with the link up: a frame problem (logged by the link)
     if (!sent && link_up(h->link))
-        h->status = HANDSHAKE_FAILED;
+        fail(h, "cannot send a request");
 }
 
 static bool acked(const cJSON *reply)
@@ -47,15 +53,17 @@ static const char *error_code(const cJSON *reply)
     return cJSON_IsString(err) ? err->valuestring : "?";
 }
 
-void handshake_start(handshake_t *h, link_t *link, const config_t *cfg, model_t *model)
+void handshake_start(handshake_t *h, link_t *link, const config_t *cfg, model_t *model,
+                     bool quiet)
 {
     memset(h, 0, sizeof *h);
     h->link = link;
     h->cfg = cfg;
     h->model = model;
+    h->quiet = quiet;
     h->status = HANDSHAKE_RUNNING;
     model_reset(model);
-    log_info("handshake: identify");
+    hs_info(h, "handshake: identify");
     send(h, link_new_request("identify", NULL), on_identify);
 }
 
@@ -84,7 +92,7 @@ static void on_identify(void *ctx, const cJSON *reply)
         return;
     }
     snprintf(h->fw, sizeof h->fw, "%s", fw->valuestring);
-    log_info("handshake: firmware %s, protocol %d, settings_applied %s",
+    hs_info(h, "handshake: firmware %s, protocol %d, settings_applied %s",
              h->fw, HANDSHAKE_PROTO, cJSON_IsTrue(applied) ? "true" : "false");
     send(h, link_new_request("list_objects", NULL), on_list_objects);
 }
@@ -140,17 +148,17 @@ static void on_list_objects(void *ctx, const cJSON *reply)
         const model_device_t *d = &model->devices[i];
         const config_device_t *dev = config_find_device(cfg, d->oid);
         if (dev == NULL) {
-            log_info("handshake: %s (%s): no INI section, firmware defaults", d->oid, d->type);
+            hs_info(h, "handshake: %s (%s): no INI section, firmware defaults", d->oid, d->type);
             continue;
         }
-        log_info("handshake: %s (%s): INI section [%s]", d->oid, d->type, dev->oid);
+        hs_info(h, "handshake: %s (%s): INI section [%s]", d->oid, d->type, dev->oid);
         if (!check_section(h, d, dev))
             return;
     }
     for (size_t i = 0; i < cfg->device_count; i++) {
         const char *oid = cfg->devices[i].oid;
         if (model_find(model, oid) == NULL)
-            log_warn("[%s] (line %d): the MCU has no such object; section ignored",
+            hs_warn(h, "[%s] (line %d): the MCU has no such object; section ignored",
                      oid, cfg->devices[i].line);
     }
 
@@ -159,7 +167,7 @@ static void on_list_objects(void *ctx, const cJSON *reply)
     cJSON *req = link_new_request("set_link", NULL);
     cJSON_AddNumberToObject(req, "report_period", cfg->report_period);
     cJSON_AddNumberToObject(req, "timeout_ms", cfg->timeout_ms);
-    log_info("handshake: set_link report_period %ld, timeout_ms %ld",
+    hs_info(h, "handshake: set_link report_period %ld, timeout_ms %ld",
              (long)cfg->report_period, (long)cfg->timeout_ms);
     send(h, req, on_set_link);
 }
@@ -181,8 +189,23 @@ void handshake_motion_fields(const config_device_t *dev, cJSON *req)
         cJSON_AddNullToObject(req, "soft_limit_max");
 }
 
-// set_motion for the next stepper with an INI section, from h->next on;
-// settings_done once there is none left
+// Settings clients changed at runtime replace the INI's (D-R3)
+static void runtime_fields(const model_runtime_t *rt, cJSON *req)
+{
+    static const char *const fields[MODEL_SETTINGS] = {
+        [MODEL_SPEED] = "speed", [MODEL_ACCEL] = "accel", [MODEL_MICRO] = "microsteps",
+    };
+
+    for (int s = 0; rt != NULL && s < MODEL_SETTINGS; s++) {
+        if (!rt->has[s])
+            continue;
+        cJSON_DeleteItemFromObjectCaseSensitive(req, fields[s]);
+        cJSON_AddNumberToObject(req, fields[s], rt->value[s]);
+    }
+}
+
+// set_motion for the next stepper with an INI section or runtime settings,
+// from h->next on; settings_done once there is none left
 static void send_next_motion(handshake_t *h)
 {
     model_t *model = h->model;
@@ -190,18 +213,21 @@ static void send_next_motion(handshake_t *h)
     for (; h->next < model->count; h->next++) {
         const model_device_t *d = &model->devices[h->next];
         const config_device_t *dev = config_find_device(h->cfg, d->oid);
-        if (dev == NULL || !model_is_stepper(d))
+        const model_runtime_t *rt = model_runtime(model, d->oid);
+        if ((dev == NULL && rt == NULL) || !model_is_stepper(d))
             continue;
 
         cJSON *req = link_new_request("set_motion", d->oid);
-        handshake_motion_fields(dev, req);
+        if (dev != NULL)
+            handshake_motion_fields(dev, req);
+        runtime_fields(rt, req);
         char *fields = cJSON_PrintUnformatted(req);
-        log_info("handshake: %s settings %s", d->oid, fields != NULL ? fields : "?");
+        hs_info(h, "handshake: %s settings %s", d->oid, fields != NULL ? fields : "?");
         cJSON_free(fields);
         send(h, req, on_set_motion);
         return;
     }
-    log_info("handshake: settings_done");
+    hs_info(h, "handshake: settings_done");
     send(h, link_new_request("settings_done", NULL), on_settings_done);
 }
 
@@ -271,7 +297,7 @@ static void send_next_get_state(handshake_t *h)
         }
     }
     h->status = HANDSHAKE_READY;
-    log_info("handshake: done, %zu object(s)", model->count);
+    hs_info(h, "handshake: done, %zu object(s)", model->count);
 }
 
 static void on_settings_done(void *ctx, const cJSON *reply)
@@ -300,7 +326,7 @@ static void on_get_state(void *ctx, const cJSON *reply)
         return;
     }
     model_set_state(d, reply);
-    log_info("handshake: %s pos %ld, pos_valid %s, moving %s, enabled %s", d->oid,
+    hs_info(h, "handshake: %s pos %ld, pos_valid %s, moving %s, enabled %s", d->oid,
              (long)d->pos, d->pos_valid ? "true" : "false",
              d->moving ? "true" : "false", d->locked ? "true" : "false");
     h->next++;
