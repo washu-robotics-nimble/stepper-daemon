@@ -99,20 +99,21 @@ Questions are at the end; answer them as before.
 
 ### 8. Daemon link and handshake
 
-- `src/daemon/`, build target `stepperd`.
-- New INI schema: `[daemon]`, `[link]`, `[m0]` (D-R43). New sample `motor.ini`.
+- `src/daemon/`, build target `nimhubd` (named `stepperd` until 2026-11-02).
+- New INI schema: `[daemon]`, `[link]`, `[m0]` (D-R43). New sample `nimhub.ini` (replacing `motor.ini`).
 - Open the serial device exclusively and refuse to start if it is already held (D-R1).
 - Handshake: `identify`, `list_objects`, per-object settings, `settings_done` (D-R3). Log every frame in debug mode.
 - `tests/dummy_mcu.py`: a stdlib-only Python dummy MCU on a pty, implementing the catalogue well enough to test the daemon without the Pico.
+- `tests/check_daemon.py`, run by `make check-daemon` (not part of `make test`): `nimhubd` against `dummy_mcu.py`, end to end.
 
-**Test:** `stepperd` against `dummy_mcu.py`, then against the Pico. The log shows the handshake and the settings sent. A second `stepperd` instance refuses to start.
+**Test:** `nimhubd` against `dummy_mcu.py`, then against the Pico. The log shows the handshake and the settings sent. A second `nimhubd` instance refuses to start.
 
 ### 9. Client socket, end to end (**MVP milestone 1**)
 
 - Unix socket at the configured path, JSON client protocol (D-R40–D-R42), one dispatch path.
 - Commands: `status`, `pos`, `rel`, `abs`, `stop`, `estop`. No lease yet: every client may write.
 
-**Test:** `socat - UNIX-CONNECT:/run/stepper-daemon/control.sock`, then `{"seq":1,"dev":"m0","cmd":"rel","steps":400}`: the analyzer shows 400 ramped pulses and the reply comes back.
+**Test:** `socat - UNIX-CONNECT:/run/nimhubd/control.sock`, then `{"seq":1,"dev":"m0","cmd":"rel","steps":400}`: the analyzer shows 400 ramped pulses and the reply comes back.
 
 ### 10. CLI client (**MVP milestone 2**)
 
@@ -192,63 +193,3 @@ Questions are at the end; answer them as before.
 
 Later, not in this plan: PWM / servo (F-R7, F-R41), ADC (F-R40), I2C / SPI (F-R42).
 
----
-
-## Questions
-
-### P1. Build system
-
-- (a) Keep the `makefile` for the host programs (`stepperd`, `stepper-cli`, tests); the firmware gets its own CMake project in `src/firmware/` (required by the Pico SDK).
-- (b) CMake for everything.
-
-Recommendation: (a). It's the smallest change.
-
-**Answer:**
-ok.
-
-### P2. Test tooling
-
-- Host unit tests: plain C with `assert`, run by `make test`. No framework dependency.
-- Dummy MCU and protocol scripts: Python, stdlib only (`pty`, `json`). They double as a reference client for your colleagues.
-
-OK?
-
-**Answer:**
-ok. I would call it 'dummy mcu' instead of 'fake'.
-
-### P3. Firmware language and SDK version
-
-Pico SDK 2.x, C11 (B7 accepted Pico SDK in C). Any constraint on SDK version, e.g. one already used elsewhere in your lab?
-
-**Answer:**
-No constraints on SDK version. Just note which one we are using when we get one.
-
-### P4. Unbounded homing
-
-If the endstop never triggers (broken wire, or here, no jumper), homing should not run forever.
-Proposal: the board table also has a maximum homing travel; past it the axis stops with a `fault` event (`code: home_timeout`), and position stays invalid.
-This adds a requirement to F-R20 / F-R34.
-
-**Answer:**
-ok. also make sure that the INI specifies if an endstop is installed AND an endstop is configured in firmware; either one of these are not set should result in a failed `home`.
-
-### P5. Dev-board pin map and analyzer channels
-
-How many channels does your analyzer have?
-Proposed Pico pins for the board table (all free GPIOs on a bare Pico):
-
-| Signal | GPIO | Analyzer channel (if 8) |
-|---|---|---|
-| STEP | 2 | 0 |
-| DIR | 3 | 1 |
-| ENABLE | 4 | 2 |
-| MS1 / MS2 / MS3 | 5 / 6 / 7 | 3 (MS1 only) |
-| SLEEP / RESET | 8 / 9 | — |
-| Endstop (input, pull-up, active low) | 10 | 4 |
-| HX711 SCK / DOUT | 11 / 12 | 5 / 6 |
-| Debug toggle (timing measurements) | 15 | 7 |
-
-The debug pin lets the firmware mark events on the analyzer, e.g. "stop received" for measuring F-R21 latency.
-
-**Answer:**
-We have 8 channels. Don't try to automate that; do it only manually because it relies on very specific hardware.

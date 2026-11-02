@@ -28,7 +28,7 @@ To ensure precision and consistency, units are in:
 - `D-R10` Daemon MUST accept at least two simultaneous client connections. (`D-G2`)
 - `D-R11` Client API MUST be independent of the client type. The CLI and the Python clients use the same commands. (`D-G2`)
 - `D-R12` Clients MUST connect over a single Unix domain socket. The daemon MUST NOT listen on any network socket. Access is controlled by the socket file's permissions. (`D-G2`)
-  - Default path: `/run/stepper-daemon/control.sock`, mode `0660`, group `stepper`. The directory is created by systemd `RuntimeDirectory=`.
+  - Default path: `/run/nimhubd/control.sock`, mode `0660`, group `stepper`. The directory is created by systemd `RuntimeDirectory=`.
   - Path and group are overridable in the INI.
 - `D-R13` Every command MUST belong to exactly one class: 'read' (read-only), 'session' (lease handling), 'emergency', or 'write'. The daemon MUST be the only place where conflicts between clients are resolved. (`D-G1`, `D-G2`)
 - `D-R15` Every client, including the interactive CLI, MUST be a separate process that connects through the client API. The daemon MUST NOT contain a user interface or serve HTTP. (`D-G2`)
