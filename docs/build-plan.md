@@ -113,7 +113,7 @@ Questions are at the end; answer them as before.
 - Unix socket at the configured path, JSON client protocol (D-R40–D-R42), one dispatch path.
 - Commands: `status`, `pos`, `rel`, `abs`, `stop`, `estop`. No lease yet: every client may write.
 
-**Test:** `socat - UNIX-CONNECT:/run/nimhubd/control.sock`, then `{"seq":1,"dev":"m0","cmd":"rel","steps":400}`: the analyzer shows 400 ramped pulses and the reply comes back.
+**Test:** `socat - UNIX-CONNECT:/run/nimhubd/control.sock`, then `{"seq":1,"dev":"m0","cmd":"rel","steps":400}`: the analyzer shows 400 ramped pulses and the reply comes back. On 2026-11-02 a USB-only check was used instead (the pulses were verified in step 4): `status` until `moving` is false, with `pos` 400, plus the error cases. `make check-daemon` covers the rest against `dummy_mcu.py`.
 
 ### 10. CLI client (**MVP milestone 2**)
 

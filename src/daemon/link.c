@@ -30,6 +30,14 @@ static void go_down(link_t *l, const char *fmt, ...)
     vsnprintf(l->down_reason, sizeof l->down_reason, fmt, ap);
     va_end(ap);
     log_error("link down: %s", l->down_reason);
+
+    // No reply will come: every waiting request gets NULL instead
+    while (l->pending_count > 0) {
+        link_pending_t p = l->pending[--l->pending_count];
+        if (p.fn != NULL)
+            p.fn(p.ctx, NULL);
+    }
+    l->tx_len = 0;
 }
 
 void link_init(link_t *l, int fd, uint32_t reply_timeout_ms,
@@ -60,7 +68,6 @@ static void flush(link_t *l)
             if (errno == EAGAIN || errno == EINTR)
                 break;
             go_down(l, "write: %s", strerror(errno));
-            l->tx_len = 0;
             return;
         }
         done += (size_t)n;

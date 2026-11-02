@@ -25,6 +25,7 @@ Options for tests:
                     if it were lost (D-R30). Repeatable.
     --busy-ms N     set_motion fails with busy for N ms after each port open,
                     as for an axis still finishing a move
+    --pos-valid     steppers start with a valid position, as after homing
     --proto N, --fw VERSION   what identify reports
 
 Example:
@@ -306,6 +307,8 @@ class DummyMCU:
         self.objects = {}           # oid -> (type, object), in board order
         for oid, typ in objects:
             obj = Stepper(self, oid) if typ == "stepper" else Object(self, oid)
+            if typ == "stepper":
+                obj.pos_valid = args.pos_valid
             self.objects[oid] = (typ, obj)
         self.settings_applied = False
         self.report_period = 250
@@ -531,6 +534,7 @@ def main():
     parser.add_argument("--proto", type=int, default=1)
     parser.add_argument("--no-reply", action="append", default=[], metavar="CMD")
     parser.add_argument("--busy-ms", type=int, default=0, metavar="N")
+    parser.add_argument("--pos-valid", action="store_true")
     args = parser.parse_args()
 
     master, slave = os.openpty()

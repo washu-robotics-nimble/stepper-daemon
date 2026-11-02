@@ -10,6 +10,7 @@ static void on_list_objects(void *ctx, const cJSON *reply);
 static void on_set_link(void *ctx, const cJSON *reply);
 static void on_set_motion(void *ctx, const cJSON *reply);
 static void on_settings_done(void *ctx, const cJSON *reply);
+static void on_get_state(void *ctx, const cJSON *reply);
 
 static void fail(handshake_t *h, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
@@ -46,25 +47,25 @@ static const char *error_code(const cJSON *reply)
     return cJSON_IsString(err) ? err->valuestring : "?";
 }
 
-static bool is_stepper(const handshake_object_t *o)
-{
-    return strcmp(o->type, "stepper") == 0;
-}
-
-void handshake_start(handshake_t *h, link_t *link, const config_t *cfg)
+void handshake_start(handshake_t *h, link_t *link, const config_t *cfg, model_t *model)
 {
     memset(h, 0, sizeof *h);
     h->link = link;
     h->cfg = cfg;
+    h->model = model;
     h->status = HANDSHAKE_RUNNING;
+    model_reset(model);
     log_info("handshake: identify");
     send(h, link_new_request("identify", NULL), on_identify);
 }
 
-// F-R33: the first exchange; refuse a protocol this daemon doesn't speak
+// F-R33: the first exchange; refuse a protocol this daemon doesn't speak.
+// Every callback gets NULL if the link went down: the main loop sees that.
 static void on_identify(void *ctx, const cJSON *reply)
 {
     handshake_t *h = ctx;
+    if (reply == NULL)
+        return;
     const cJSON *fw = cJSON_GetObjectItemCaseSensitive(reply, "fw");
     const cJSON *proto = cJSON_GetObjectItemCaseSensitive(reply, "proto");
     const cJSON *applied = cJSON_GetObjectItemCaseSensitive(reply, "settings_applied");
@@ -88,14 +89,14 @@ static void on_identify(void *ctx, const cJSON *reply)
     send(h, link_new_request("list_objects", NULL), on_list_objects);
 }
 
-// Every value in an object's section must be a setting of its type
-static bool check_section(handshake_t *h, const handshake_object_t *o,
+// Every value in a device's section must be a setting of its type
+static bool check_section(handshake_t *h, const model_device_t *d,
                           const config_device_t *dev)
 {
     for (size_t i = 0; i < dev->count; i++) {
         const config_key_t *key = dev->values[i].key;
-        if (strcmp(key->type, o->type) != 0) {
-            fail(h, "[%s]: '%s' is not a setting of a %s", o->oid, key->name, o->type);
+        if (strcmp(key->type, d->type) != 0) {
+            fail(h, "[%s]: '%s' is not a setting of a %s", d->oid, key->name, d->type);
             return false;
         }
     }
@@ -106,7 +107,10 @@ static bool check_section(handshake_t *h, const handshake_object_t *o,
 static void on_list_objects(void *ctx, const cJSON *reply)
 {
     handshake_t *h = ctx;
+    if (reply == NULL)
+        return;
     const config_t *cfg = h->cfg;
+    model_t *model = h->model;
     const cJSON *objects = cJSON_GetObjectItemCaseSensitive(reply, "objects");
     const cJSON *item;
 
@@ -121,38 +125,31 @@ static void on_list_objects(void *ctx, const cJSON *reply)
     cJSON_ArrayForEach(item, objects) {
         const cJSON *oid = cJSON_GetObjectItemCaseSensitive(item, "oid");
         const cJSON *type = cJSON_GetObjectItemCaseSensitive(item, "type");
-        if (!cJSON_IsString(oid) || !cJSON_IsString(type)
-            || strlen(oid->valuestring) >= CONFIG_OID_MAX
-            || strlen(type->valuestring) >= sizeof h->objects[0].type) {
+        if (!cJSON_IsString(oid) || !cJSON_IsString(type)) {
             fail(h, "list_objects: bad object entry");
             return;
         }
-        if (h->object_count == HANDSHAKE_MAX_OBJECTS) {
-            fail(h, "list_objects: more than %d objects", HANDSHAKE_MAX_OBJECTS);
+        if (model_add(model, oid->valuestring, type->valuestring) == NULL) {
+            fail(h, "list_objects: more than %d objects, or a name too long",
+                 MODEL_MAX_DEVICES);
             return;
         }
-        handshake_object_t *o = &h->objects[h->object_count++];
-        strcpy(o->oid, oid->valuestring);
-        strcpy(o->type, type->valuestring);
     }
 
-    for (size_t i = 0; i < h->object_count; i++) {
-        const handshake_object_t *o = &h->objects[i];
-        const config_device_t *dev = config_find_device(cfg, o->oid);
+    for (size_t i = 0; i < model->count; i++) {
+        const model_device_t *d = &model->devices[i];
+        const config_device_t *dev = config_find_device(cfg, d->oid);
         if (dev == NULL) {
-            log_info("handshake: %s (%s): no INI section, firmware defaults", o->oid, o->type);
+            log_info("handshake: %s (%s): no INI section, firmware defaults", d->oid, d->type);
             continue;
         }
-        log_info("handshake: %s (%s): INI section [%s]", o->oid, o->type, dev->oid);
-        if (!check_section(h, o, dev))
+        log_info("handshake: %s (%s): INI section [%s]", d->oid, d->type, dev->oid);
+        if (!check_section(h, d, dev))
             return;
     }
     for (size_t i = 0; i < cfg->device_count; i++) {
         const char *oid = cfg->devices[i].oid;
-        bool found = false;
-        for (size_t j = 0; j < h->object_count && !found; j++)
-            found = strcmp(h->objects[j].oid, oid) == 0;
-        if (!found)
+        if (model_find(model, oid) == NULL)
             log_warn("[%s] (line %d): the MCU has no such object; section ignored",
                      oid, cfg->devices[i].line);
     }
@@ -188,16 +185,18 @@ void handshake_motion_fields(const config_device_t *dev, cJSON *req)
 // settings_done once there is none left
 static void send_next_motion(handshake_t *h)
 {
-    for (; h->next < h->object_count; h->next++) {
-        const handshake_object_t *o = &h->objects[h->next];
-        const config_device_t *dev = config_find_device(h->cfg, o->oid);
-        if (dev == NULL || !is_stepper(o))
+    model_t *model = h->model;
+
+    for (; h->next < model->count; h->next++) {
+        const model_device_t *d = &model->devices[h->next];
+        const config_device_t *dev = config_find_device(h->cfg, d->oid);
+        if (dev == NULL || !model_is_stepper(d))
             continue;
 
-        cJSON *req = link_new_request("set_motion", o->oid);
+        cJSON *req = link_new_request("set_motion", d->oid);
         handshake_motion_fields(dev, req);
         char *fields = cJSON_PrintUnformatted(req);
-        log_info("handshake: %s settings %s", o->oid, fields != NULL ? fields : "?");
+        log_info("handshake: %s settings %s", d->oid, fields != NULL ? fields : "?");
         cJSON_free(fields);
         send(h, req, on_set_motion);
         return;
@@ -209,6 +208,8 @@ static void send_next_motion(handshake_t *h)
 static void on_set_link(void *ctx, const cJSON *reply)
 {
     handshake_t *h = ctx;
+    if (reply == NULL)
+        return;
     uint32_t timeout = (uint32_t)h->cfg->timeout_ms;
 
     if (!acked(reply)) {
@@ -224,7 +225,9 @@ static void on_set_link(void *ctx, const cJSON *reply)
 static void on_set_motion(void *ctx, const cJSON *reply)
 {
     handshake_t *h = ctx;
-    const char *oid = h->objects[h->next].oid;
+    if (reply == NULL)
+        return;
+    const char *oid = h->model->devices[h->next].oid;
 
     if (acked(reply)) {
         h->busy_since = 0;
@@ -254,16 +257,54 @@ static void on_set_motion(void *ctx, const cJSON *reply)
         fail(h, "[%s]: the MCU rejected the settings: %s", oid, err);
 }
 
+// get_state for the next stepper, from h->next on; ready once there is none
+// left
+static void send_next_get_state(handshake_t *h)
+{
+    model_t *model = h->model;
+
+    for (; h->next < model->count; h->next++) {
+        const model_device_t *d = &model->devices[h->next];
+        if (model_is_stepper(d)) {
+            send(h, link_new_request("get_state", d->oid), on_get_state);
+            return;
+        }
+    }
+    h->status = HANDSHAKE_READY;
+    log_info("handshake: done, %zu object(s)", model->count);
+}
+
 static void on_settings_done(void *ctx, const cJSON *reply)
 {
     handshake_t *h = ctx;
+    if (reply == NULL)
+        return;
 
     if (!acked(reply)) {
         fail(h, "settings_done: %s", error_code(reply));
         return;
     }
-    h->status = HANDSHAKE_READY;
-    log_info("handshake: done, %zu object(s)", h->object_count);
+    h->next = 0;
+    send_next_get_state(h);
+}
+
+static void on_get_state(void *ctx, const cJSON *reply)
+{
+    handshake_t *h = ctx;
+    if (reply == NULL)
+        return;
+    model_device_t *d = &h->model->devices[h->next];
+
+    if (!acked(reply)) {
+        fail(h, "%s: get_state: %s", d->oid, error_code(reply));
+        return;
+    }
+    model_set_state(d, reply);
+    log_info("handshake: %s pos %ld, pos_valid %s, moving %s, enabled %s", d->oid,
+             (long)d->pos, d->pos_valid ? "true" : "false",
+             d->moving ? "true" : "false", d->locked ? "true" : "false");
+    h->next++;
+    send_next_get_state(h);
 }
 
 int handshake_poll_timeout(const handshake_t *h)

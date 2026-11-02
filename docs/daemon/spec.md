@@ -26,6 +26,7 @@ To ensure precision and consistency, units are in:
 ## Clients
 
 - `D-R10` Daemon MUST accept at least two simultaneous client connections. (`D-G2`)
+  - It accepts up to 8; a connection beyond that is closed at once.
 - `D-R11` Client API MUST be independent of the client type. The CLI and the Python clients use the same commands. (`D-G2`)
 - `D-R12` Clients MUST connect over a single Unix domain socket. The daemon MUST NOT listen on any network socket. Access is controlled by the socket file's permissions. (`D-G2`)
   - Default path: `/run/nimhubd/control.sock`, mode `0660`, group `stepper`. The directory is created by systemd `RuntimeDirectory=`.
@@ -47,7 +48,9 @@ To ensure precision and consistency, units are in:
 ## Client protocol
 
 - `D-R40` Framing: newline-delimited JSON over the Unix socket, UTF-8, one object per line terminated by `\n`. Lines are capped at 4096 bytes. An over-length or unparseable line is dropped and answered with `bad_request`; if its `seq` can't be read, the error is sent as a `bad_request` event instead of a reply. (`D-G2`)
+  - The event is `{"evt":"bad_request","msg":...}`. A `seq` can't be read when the line is over-length, isn't a JSON object, or has no `seq` that is an integer in uint32 range.
 - `D-R41` Every request MUST get exactly one reply, echoing the request's `seq`. Replies and events MAY interleave on the same connection. (`D-G2`)
+  - A client that shuts down its sending side (e.g. `socat` at the end of its input) still gets the replies to its requests; the daemon closes the connection after them.
 - `D-R42` Receivers MUST ignore unknown fields. (`D-G2`)
 - `D-R43` Devices are the objects the firmware reports (F-R35), named by their `oid` (e.g. `m0`, `lc0`). What is installed is known only from that query. The INI has one section per device, named by its `oid` (e.g. `[m0]`, `[lc0]`); there are no per-type defaults. A section for an `oid` the firmware doesn't report is ignored with a log line. The section names `daemon` and `link` are reserved for daemon settings and are never used as `oid`s. (`D-G1`)
 - `D-R44` A stepper's INI section MUST state whether an endstop is installed (`endstop = true` / `false`; missing means `false`). The daemon MUST reject `home` with `no_endstop`, without sending it to the firmware, unless the INI says an endstop is installed; the firmware rejects it in turn if its board table has none (F-R20). (`D-G1`)
@@ -86,7 +89,7 @@ Error codes:
 | `lease_held` | Write command without holding the lease, or lease held by another client |
 | `busy` | Device is moving and the command needs it idle |
 | `not_moving` | `stop` with no move in progress |
-| `pos_invalid` | Absolute move while position is invalid |
+| `pos_invalid` | Absolute move while position is invalid, or any move while position is invalid and soft limits are set (F-R25) |
 | `link_down` | MCU link down, or config not yet re-sent (D-R30) |
 | `no_endstop` | `home` on an axis without an endstop, in the INI or in the firmware (D-R44) |
 | `not_impl` | Command defined but not implemented yet |
@@ -103,12 +106,16 @@ Arguments are listed in braces as JSON keys. Results are returned as keys in the
 |---|---|---|---|
 | `rel` {`steps`} | write | Relative move | lease held, busy, link down |
 | `abs` {`pos`} | write | Absolute move | lease held, busy, position invalid, link down |
-| `stop` | write | Stop the current move | lease held, not moving |
+| `stop` | write | Stop the current move. Returns `pos`, where the move ends | lease held, not moving |
 | `speed` / `accel` / `micro` {`value`} | write | Set a parameter (rejected when moving) | lease held, busy, bad parameter |
-| `pos` / `status` | read | Report state | n/a |
+| `pos` / `status` | read | Report state. `pos` returns `pos`, `pos_valid`; `status` returns `pos`, `pos_valid`, `moving`, `locked` (driver enabled) | n/a |
 | `zero` | write | Set the current position to 0 | lease held |
 | `home` | write | Run the homing sequence | lease held, no endstop, not implemented yet |
 | `lock` / `unlock` | write | Enable or disable the driver output | lease held |
+
+`rel` and `abs` reply once the firmware has accepted the move, not when it ends; `status` shows `moving` until it has ended. Their `steps` and `pos` are int32 (`bad_param` otherwise). The firmware's own checks can reject them too: `busy`, `bad_param` (e.g. a target outside the soft limits), and `pos_invalid` for any move while soft limits are set and the position is invalid (F-R25). `abs` is rejected with `pos_invalid` whenever the position is invalid, without asking the firmware.
+
+`pos` and `status` are answered from the latest firmware reports (D-R20): the events, and the replies to the commands the daemon sends. They don't query the firmware, so during a move `pos` can be up to the firmware's `report_period` old (F-R32).
 
 ### Load sensor device
 

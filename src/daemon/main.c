@@ -8,11 +8,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include "commands.h"
 #include "config.h"
 #include "handshake.h"
 #include "link.h"
 #include "log.h"
+#include "model.h"
 #include "serial.h"
+#include "server.h"
 
 #define CONFIG_NAME "nimhub.ini"
 #define CONFIG_DIR  "/etc/nimhubd"
@@ -57,10 +60,11 @@ static const char *default_config(char *buf, size_t size)
 }
 
 // Events from the MCU. Every frame is logged at debug level anyway; position
-// events are too frequent for more.
+// events are too frequent for more. ctx is the machine model.
 static void on_event(void *ctx, const cJSON *evt)
 {
-    (void)ctx;
+    model_event(ctx, evt);
+
     const cJSON *name = cJSON_GetObjectItemCaseSensitive(evt, "evt");
     if (cJSON_IsString(name) && strcmp(name->valuestring, "position") == 0)
         return;
@@ -116,14 +120,27 @@ int main(int argc, char *argv[])
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
-    int fd = serial_open(cfg.device);   // D-R1
+    // A write to a client that has gone fails with EPIPE instead
+    signal(SIGPIPE, SIG_IGN);
+
+    // The device first: if another nimhubd holds it, this one stops before
+    // touching that one's socket (D-R1)
+    int fd = serial_open(cfg.device);
     if (fd < 0)
         return EXIT_FAILURE;
 
+    static model_t model;
     static link_t link;
     static handshake_t hs;
-    link_init(&link, fd, (uint32_t)cfg.reply_timeout_ms, on_event, NULL);
-    handshake_start(&hs, &link, &cfg);
+    static server_t server;
+    static commands_t commands;
+    link_init(&link, fd, (uint32_t)cfg.reply_timeout_ms, on_event, &model);
+    commands_init(&commands, &link, &model, &hs, &server);
+    if (server_open(&server, cfg.socket, cfg.group, commands_line, &commands) != 0) {
+        serial_close(fd);
+        return EXIT_FAILURE;
+    }
+    handshake_start(&hs, &link, &cfg, &model);
 
     int status = EXIT_SUCCESS;
     for (;;) {
@@ -131,6 +148,7 @@ int main(int argc, char *argv[])
         // the daemon; a failed handshake always does, since retrying won't
         // change the outcome
         if (!link_up(&link) || hs.status == HANDSHAKE_FAILED) {
+            model_link_down(&model);
             status = EXIT_FAILURE;
             break;
         }
@@ -140,9 +158,11 @@ int main(int argc, char *argv[])
         if (retry >= 0 && (timeout < 0 || retry < timeout))
             timeout = retry;
         struct timespec ts = {.tv_sec = timeout / 1000, .tv_nsec = (timeout % 1000) * 1000000L};
-        struct pollfd pfd = {.fd = fd, .events = link_poll_events(&link)};
+        struct pollfd pfds[2 + SERVER_MAX_CLIENTS];
+        pfds[0] = (struct pollfd){.fd = fd, .events = link_poll_events(&link)};
+        size_t count = 1 + server_poll_fill(&server, &pfds[1]);
 
-        int n = ppoll(&pfd, 1, timeout < 0 ? NULL : &ts, &wait_mask);
+        int n = ppoll(pfds, count, timeout < 0 ? NULL : &ts, &wait_mask);
         if (n < 0 && errno != EINTR) {
             log_error("poll: %s", strerror(errno));
             status = EXIT_FAILURE;
@@ -154,12 +174,15 @@ int main(int argc, char *argv[])
             log_info("%s: closing the link", strsignal(stop_signal));
             break;
         }
-        if (n > 0)
-            link_handle(&link, pfd.revents);
+        if (n > 0) {
+            link_handle(&link, pfds[0].revents);
+            server_poll_handle(&server, &pfds[1]);
+        }
         link_tick(&link);
         handshake_tick(&hs);
     }
 
+    server_close(&server);
     serial_close(fd);
     return status;
 }

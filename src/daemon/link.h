@@ -16,7 +16,8 @@
 #define LINK_TX_MAX      16384  // frames waiting for the device to take them
 #define LINK_MAX_PENDING 32     // requests waiting for their reply
 
-// Called with the reply to a request (ack true or false)
+// Called with the reply to a request (ack true or false), or with NULL if
+// the link went down first
 typedef void (*link_reply_fn)(void *ctx, const cJSON *reply);
 // Called with each event from the MCU
 typedef void (*link_event_fn)(void *ctx, const cJSON *evt);
@@ -55,9 +56,11 @@ uint64_t monotonic_ms(void);
 void link_init(link_t *l, int fd, uint32_t reply_timeout_ms,
                link_event_fn on_event, void *event_ctx);
 
-// Send a request: req (an object without seq) gets the next seq. fn gets the
-// reply. False if it can't be sent (logged): the link is down, or the frame
-// is too long, or too much is waiting.
+// Send a request: req (an object without seq) gets the next seq. If this
+// returns true, fn (unless NULL) is called exactly once, maybe even before
+// this returns. False if it can't be sent (logged, except for a link that
+// is down): the link is down, or the frame is too long, or too much is
+// waiting; fn is never called then.
 bool link_request(link_t *l, const cJSON *req, link_reply_fn fn, void *ctx);
 
 // A request with only cmd and, unless NULL, oid
